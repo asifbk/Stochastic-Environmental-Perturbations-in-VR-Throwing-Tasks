@@ -25,6 +25,16 @@ namespace Basketball
         /// <summary>Fired immediately after a throw is successfully launched.</summary>
         public event System.Action OnShotFired;
 
+        /// <summary>
+        /// Increments the shot counter and fires OnShotFired without performing a physics throw.
+        /// Used by HandThrow to keep the scoreboard in sync when the player throws manually.
+        /// </summary>
+        public void RecordShot()
+        {
+            TotalShots++;
+            OnShotFired?.Invoke();
+        }
+
         private void Update()
         {
             if (Input.GetKeyDown(KeyCode.P))
@@ -60,8 +70,7 @@ namespace Basketball
 
             ballRigidbody.AddForce(launchVelocity, ForceMode.VelocityChange);
 
-            TotalShots++;
-            OnShotFired?.Invoke();
+            RecordShot();
         }
 
         /// <summary>
