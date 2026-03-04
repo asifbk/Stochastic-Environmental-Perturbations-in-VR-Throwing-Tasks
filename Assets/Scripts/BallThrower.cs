@@ -1,115 +1,106 @@
 using UnityEngine;
+#if ENABLE_INPUT_SYSTEM
+using UnityEngine.InputSystem;
+#endif
 
 namespace Basketball
 {
     /// <summary>
-    /// Throws a basketball toward the hoop using projectile motion when the P key is pressed.
-    /// Assign the ball's Rigidbody, the hoop target Transform, and an optional throw origin Transform.
+    /// Manages all basketballs in the scene.
+    /// Press P at runtime to instantly reset every ball to its starting position and rotation.
+    /// Exposes RecordShot() so HandThrow can keep the scoreboard in sync.
     /// </summary>
     public class BallThrower : MonoBehaviour
     {
-        [Header("References")]
-        [SerializeField] private Rigidbody ballRigidbody;
-        [SerializeField] private Transform hoopTarget;
-        [SerializeField] private Transform throwOriginTransform;
+        [Header("Balls")]
+        [Tooltip("Assign all basketball Rigidbodies here.")]
+        [SerializeField] private Rigidbody[] ballRigidbodies;
 
-        [Header("Launch Settings")]
-        [SerializeField] [Range(20f, 75f)] private float launchAngleDegrees = 52f;
+        [Header("Reset")]
+        [Tooltip("All balls teleport to this point when P is pressed. If unassigned, balls return to their Start() positions.")]
+        [SerializeField] private Transform resetPoint;
+        [Tooltip("Horizontal spacing between balls when reset to the same point (metres).")]
+        [SerializeField] private float resetSpacing = 0.4f;
 
-        private Vector3 ThrowOrigin =>
-            throwOriginTransform != null ? throwOriginTransform.position : ballRigidbody.transform.position;
+        // Snapshots of each ball's position and rotation taken at Start().
+        private Vector3[]    _initialPositions;
+        private Quaternion[] _initialRotations;
 
         /// <summary>Total number of throw attempts since the session started.</summary>
         public int TotalShots { get; private set; }
 
-        /// <summary>Fired immediately after a throw is successfully launched.</summary>
+        /// <summary>Fired immediately after RecordShot is called.</summary>
         public event System.Action OnShotFired;
 
+        private void Start()
+        {
+            if (ballRigidbodies == null) return;
+
+            _initialPositions = new Vector3[ballRigidbodies.Length];
+            _initialRotations = new Quaternion[ballRigidbodies.Length];
+
+            for (int i = 0; i < ballRigidbodies.Length; i++)
+            {
+                if (ballRigidbodies[i] == null) continue;
+                _initialPositions[i] = ballRigidbodies[i].transform.position;
+                _initialRotations[i] = ballRigidbodies[i].transform.rotation;
+            }
+        }
+
+        private void Update()
+        {
+#if ENABLE_INPUT_SYSTEM
+            if (Keyboard.current != null && Keyboard.current.pKey.wasPressedThisFrame)
+                ResetAllBalls();
+#else
+            if (Input.GetKeyDown(KeyCode.P))
+                ResetAllBalls();
+#endif
+        }
+
         /// <summary>
-        /// Increments the shot counter and fires OnShotFired without performing a physics throw.
-        /// Used by HandThrow to keep the scoreboard in sync when the player throws manually.
+        /// Teleports every ball back to resetPoint (side-by-side) or to their Start() positions if no point is set.
+        /// All momentum is zeroed.
+        /// </summary>
+        public void ResetAllBalls()
+        {
+            if (ballRigidbodies == null) return;
+
+            for (int i = 0; i < ballRigidbodies.Length; i++)
+            {
+                Rigidbody rb = ballRigidbodies[i];
+                if (rb == null) continue;
+
+                rb.velocity        = Vector3.zero;
+                rb.angularVelocity = Vector3.zero;
+
+                Vector3    targetPos = _initialPositions[i];
+                Quaternion targetRot = _initialRotations[i];
+
+                if (resetPoint != null)
+                {
+                    float offset = (i - (ballRigidbodies.Length - 1) * 0.5f) * resetSpacing;
+                    targetPos = resetPoint.position + resetPoint.right * offset;
+                    targetRot = resetPoint.rotation;
+                }
+
+                // Use rb.position (not transform.position) so Unity correctly
+                // resets the interpolation buffer on interpolated Rigidbodies.
+                rb.position = targetPos;
+                rb.rotation = targetRot;
+            }
+
+            Debug.Log("[BallThrower] All balls reset.");
+        }
+
+        /// <summary>
+        /// Increments the shot counter and fires OnShotFired.
+        /// Called by HandThrow when the player releases a ball.
         /// </summary>
         public void RecordShot()
         {
             TotalShots++;
             OnShotFired?.Invoke();
-        }
-
-        private void Update()
-        {
-            if (Input.GetKeyDown(KeyCode.P))
-            {
-                ThrowBall();
-            }
-        }
-
-        /// <summary>
-        /// Resets the ball to the throw origin and launches it toward the hoop using projectile motion.
-        /// </summary>
-        public void ThrowBall()
-        {
-            if (ballRigidbody == null || hoopTarget == null)
-            {
-                Debug.LogWarning("[BallThrower] Ball Rigidbody or Hoop Target is not assigned.");
-                return;
-            }
-
-            // Reset ball physics state
-            ballRigidbody.velocity = Vector3.zero;
-            ballRigidbody.angularVelocity = Vector3.zero;
-            ballRigidbody.transform.position = ThrowOrigin;
-            ballRigidbody.transform.rotation = Quaternion.identity;
-
-            Vector3 launchVelocity = ComputeLaunchVelocity(ThrowOrigin, hoopTarget.position, launchAngleDegrees);
-
-            if (launchVelocity == Vector3.zero)
-            {
-                Debug.LogWarning("[BallThrower] Could not compute a valid launch velocity. Try adjusting the launch angle.");
-                return;
-            }
-
-            ballRigidbody.AddForce(launchVelocity, ForceMode.VelocityChange);
-
-            RecordShot();
-        }
-
-        /// <summary>
-        /// Computes the initial velocity vector to reach the target from the origin at the given launch angle,
-        /// accounting for gravity via projectile motion equations.
-        /// </summary>
-        private Vector3 ComputeLaunchVelocity(Vector3 origin, Vector3 target, float angleDegrees)
-        {
-            const float Gravity = 9.81f;
-
-            Vector3 toTarget = target - origin;
-            Vector3 horizontalDelta = new Vector3(toTarget.x, 0f, toTarget.z);
-            float horizontalDistance = horizontalDelta.magnitude;
-            float verticalDelta = toTarget.y;
-
-            if (horizontalDistance < 0.001f)
-            {
-                return Vector3.zero;
-            }
-
-            float angleRad = angleDegrees * Mathf.Deg2Rad;
-            float tanAngle = Mathf.Tan(angleRad);
-            float cosAngle = Mathf.Cos(angleRad);
-
-            float denominator = 2f * cosAngle * cosAngle * (horizontalDistance * tanAngle - verticalDelta);
-
-            if (denominator <= 0f)
-            {
-                return Vector3.zero;
-            }
-
-            float speedSquared = Gravity * horizontalDistance * horizontalDistance / denominator;
-            float speed = Mathf.Sqrt(speedSquared);
-
-            Vector3 horizontalDirection = horizontalDelta.normalized;
-            Vector3 velocity = horizontalDirection * (speed * cosAngle)
-                             + Vector3.up * (speed * Mathf.Sin(angleRad));
-
-            return velocity;
         }
     }
 }
