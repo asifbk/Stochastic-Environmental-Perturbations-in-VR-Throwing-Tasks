@@ -21,6 +21,9 @@ namespace Basketball
         private Vector3 _currentWindDirection;
         private float _nextChangeTime;
 
+        /// <summary>Current normalised wind direction in world-space XZ plane.</summary>
+        public Vector3 WindDirection => _currentWindDirection;
+
         /// <summary>Current wind speed in metres per second.</summary>
         public float WindSpeedMs => _currentWindSpeed;
 

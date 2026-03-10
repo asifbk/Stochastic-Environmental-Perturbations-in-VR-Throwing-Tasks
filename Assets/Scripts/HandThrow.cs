@@ -19,10 +19,16 @@ namespace Basketball
         [SerializeField] private SG_PhysicsGrab rightHandGrab;
         [SerializeField] private SG_PhysicsGrab leftHandGrab;
 
+        [Header("Wrist Trackers (XR controller / tracker Transforms, NOT physics Rigidbodies)")]
+        [Tooltip("The actual tracked Transform of the right wrist — used for true hand velocity, bypassing spring lag.")]
+        [SerializeField] private Transform rightWristTracker;
+        [Tooltip("The actual tracked Transform of the left wrist.")]
+        [SerializeField] private Transform leftWristTracker;
+
         [Header("Hand Physics Rigidbodies")]
-        [Tooltip("Rigidbody on SGHand Right / PhysicsTrackingLayer")]
+        [Tooltip("Rigidbody on SGHand Right / PhysicsTrackingLayer — fallback if tracker not assigned.")]
         [SerializeField] private Rigidbody rightHandRigidbody;
-        [Tooltip("Rigidbody on SGHand Left / PhysicsTrackingLayer")]
+        [Tooltip("Rigidbody on SGHand Left / PhysicsTrackingLayer — fallback if tracker not assigned.")]
         [SerializeField] private Rigidbody leftHandRigidbody;
 
         [Header("Ball References")]
@@ -43,11 +49,19 @@ namespace Basketball
         [Header("Game System")]
         [SerializeField] private BallThrower ballThrower;
 
-        // Ring buffers storing recent hand velocities for stable release-velocity sampling.
-        private readonly Vector3[] _rightHandVelocityHistory = new Vector3[VelocityHistorySize];
-        private readonly Vector3[] _leftHandVelocityHistory  = new Vector3[VelocityHistorySize];
+        // Ring buffers — one unified buffer per hand. Tracker position-delta is preferred;
+        // Rigidbody velocity is the fallback. Only ONE is written per frame per hand,
+        // so the index increments exactly once per frame and the buffer stays fully populated.
+        private readonly Vector3[] _rightVelocityHistory = new Vector3[VelocityHistorySize];
+        private readonly Vector3[] _leftVelocityHistory  = new Vector3[VelocityHistorySize];
         private int _rightHistoryIndex;
         private int _leftHistoryIndex;
+
+        // Stores the last known tracker world-position to compute per-frame delta velocity.
+        private Vector3 _rightTrackerLastPos;
+        private Vector3 _leftTrackerLastPos;
+        private bool _rightTrackerInitialized;
+        private bool _leftTrackerInitialized;
 
         // Tracks last time each ball moved, for auto-reset.
         private readonly Dictionary<Rigidbody, float> _lastMovedTime = new Dictionary<Rigidbody, float>();
@@ -92,9 +106,15 @@ namespace Basketball
 
         private void Update()
         {
-            // Sample hand velocities every frame to fill history buffers.
-            SampleHandVelocity(rightHandRigidbody, _rightHandVelocityHistory, ref _rightHistoryIndex);
-            SampleHandVelocity(leftHandRigidbody,  _leftHandVelocityHistory,  ref _leftHistoryIndex);
+            // Each hand samples exactly one source per frame — tracker (preferred) or Rigidbody (fallback).
+            // This ensures the index increments once per frame and the buffer stays fully populated.
+            SampleVelocity(rightWristTracker, rightHandRigidbody,
+                           ref _rightTrackerLastPos, ref _rightTrackerInitialized,
+                           _rightVelocityHistory, ref _rightHistoryIndex);
+
+            SampleVelocity(leftWristTracker, leftHandRigidbody,
+                           ref _leftTrackerLastPos, ref _leftTrackerInitialized,
+                           _leftVelocityHistory, ref _leftHistoryIndex);
 
             if (ballRigidbodies == null) return;
 
@@ -121,12 +141,46 @@ namespace Basketball
             }
         }
 
-        /// <summary>Writes the current hand velocity into the ring buffer.</summary>
-        private static void SampleHandVelocity(Rigidbody hand, Vector3[] buffer, ref int index)
+        /// <summary>
+        /// Samples velocity for one hand into its unified buffer — exactly once per frame.
+        /// Prefers the XR wrist tracker (position delta) over the Rigidbody velocity to bypass SG spring lag.
+        /// Initialises last-position on the first frame so the first sample is not a world-origin spike.
+        /// </summary>
+        private static void SampleVelocity(
+            Transform tracker, Rigidbody fallbackRb,
+            ref Vector3 lastTrackerPos, ref bool initialized,
+            Vector3[] buffer, ref int index)
         {
-            if (hand == null) return;
-            buffer[index] = hand.velocity;
-            index = (index + 1) % VelocityHistorySize;
+            Vector3 velocity;
+
+            if (tracker != null)
+            {
+                if (!initialized)
+                {
+                    // Seed last position to current position — prevents a huge spike on frame 1.
+                    lastTrackerPos = tracker.position;
+                    initialized = true;
+                    velocity = Vector3.zero;
+                }
+                else
+                {
+                    velocity = (Time.deltaTime > 0f)
+                        ? (tracker.position - lastTrackerPos) / Time.deltaTime
+                        : Vector3.zero;
+                    lastTrackerPos = tracker.position;
+                }
+            }
+            else if (fallbackRb != null)
+            {
+                velocity = fallbackRb.velocity;
+            }
+            else
+            {
+                velocity = Vector3.zero;
+            }
+
+            buffer[index] = velocity;
+            index = (index + 1) % buffer.Length;
         }
 
         /// <summary>Returns the vector with the highest magnitude from the history buffer — preserves peak throw speed.</summary>
@@ -148,31 +202,26 @@ namespace Basketball
 
         private void OnRightHandReleased(SG_Interactable interactable, SG_GrabScript grabScript)
         {
-            HandleRelease(interactable, rightHandRigidbody, _rightHandVelocityHistory, HandSide.Right);
+            HandleRelease(interactable, _rightVelocityHistory, HandSide.Right);
         }
 
         private void OnLeftHandReleased(SG_Interactable interactable, SG_GrabScript grabScript)
         {
-            HandleRelease(interactable, leftHandRigidbody, _leftHandVelocityHistory, HandSide.Left);
+            HandleRelease(interactable, _leftVelocityHistory, HandSide.Left);
         }
 
         /// <summary>
         /// Checks whether the released interactable is a basketball, applies smoothed release
         /// velocity + backspin, and records the shot.
         /// </summary>
-        private void HandleRelease(SG_Interactable interactable, Rigidbody handRigidbody, Vector3[] velocityHistory, HandSide side)
+        private void HandleRelease(SG_Interactable interactable, Vector3[] velocityHistory, HandSide side)
         {
             if (interactable == null) return;
 
             Rigidbody ballRb = interactable.GetComponent<Rigidbody>();
             if (ballRb == null || !IsBall(ballRb)) return;
 
-            // Use the peak velocity from recent history — preserves the full force of the throw gesture.
-            Vector3 smoothedVelocity = handRigidbody != null
-                ? PeakVelocity(velocityHistory)
-                : ballRb.velocity;
-
-            Vector3 releaseVelocity = smoothedVelocity * velocityMultiplier;
+            Vector3 releaseVelocity = PeakVelocity(velocityHistory) * velocityMultiplier;
 
             // Apply the computed velocity directly to the ball for immediate, responsive feel.
             ballRb.velocity = releaseVelocity;

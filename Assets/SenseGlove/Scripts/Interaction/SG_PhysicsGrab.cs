@@ -1,4 +1,4 @@
-﻿using System.Collections;
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -19,12 +19,28 @@ namespace SG
 
         /// <summary> Keeps track of the 'grabbing' pose of fingers </summary>
         protected bool[] wantsGrab = new bool[3];
-        /// <summary> Above these flexions, the hand is considered 'open' </summary>
-        protected static float[] openHandThresholds = new float[5] { 0.1f, 0.2f, 0.2f, 0.2f, 0.2f };
-        /// <summary> below these flexions, the hand is considered 'open' </summary>
-        protected static float[] closedHandThresholds = new float[5] { 2, 1.0f, 1.0f, 0.9f, 0.9f }; //set to -360 so it won;t trigger for now
 
-        protected float releaseThreshold = 0.05f;
+        /// <summary>
+        /// Minimum normalised finger flexion (0..1) to count as a 'grab intent' per finger.
+        /// Thumb, Index, Middle, Ring, Pinky.
+        /// Restored to SDK defaults — the Nova's normalised flexion range may not reliably
+        /// reach values above 0.2, so higher thresholds prevent any grab from firing.
+        /// </summary>
+        [Header("Grab Thresholds")]
+        [Tooltip("Minimum normalised flexion per finger to count as grab intent. Keep close to SDK defaults (0.1 / 0.2).")]
+        [SerializeField] protected float[] openHandThresholds = new float[5] { 0.1f, 0.2f, 0.2f, 0.2f, 0.2f };
+
+        /// <summary> Above these flexions the finger is considered over-curled and grab is blocked. </summary>
+        [Tooltip("Maximum normalised flexion per finger. Fingers curled beyond this are ignored for grabbing.")]
+        [SerializeField] protected float[] closedHandThresholds = new float[5] { 2f, 1.0f, 1.0f, 0.9f, 0.9f };
+
+        /// <summary>
+        /// How much a finger must OPEN (normalised flexion drop) from the moment of grab before the
+        /// SDK considers it a release intent. Raised from the SDK default of 0.05 to 0.15 —
+        /// requires a more deliberate opening gesture without blocking grab detection.
+        /// </summary>
+        [Tooltip("How far a finger must open from its grab position (0..1) to trigger release. Higher = harder to drop accidentally.")]
+        [SerializeField] [Range(0.05f, 0.5f)] protected float releaseThreshold = 0.15f;
         protected bool[] grabRelevance = new bool[5];
         protected bool snapFrame = false;
 
@@ -134,12 +150,11 @@ namespace SG
         }
 
 
-        /// <summary> Returns true if a specific fingers wants to grab on (when not grabbing). </summary>
-        /// <param name="finger"></param>
-        /// <returns></returns>
+        /// <summary> Returns true if a specific finger wants to grab (when not already grabbing). </summary>
         protected bool WantsGrab(int finger)
         {
-            return lastNormalized[finger] >= openHandThresholds[finger] && lastNormalized[finger] <= closedHandThresholds[finger];
+            return lastNormalized[finger] >= openHandThresholds[finger]
+                && lastNormalized[finger] <= closedHandThresholds[finger];
         }
 
 
@@ -185,10 +200,23 @@ namespace SG
 
         public static bool[] GetGrabIntent(float[] normalizedFlex)
         {
+            float[] defaultOpen   = { 0.1f, 0.2f, 0.2f, 0.2f, 0.2f };
+            float[] defaultClosed = { 2f,   1.0f, 1.0f, 0.9f, 0.9f };
             bool[] res = new bool[5];
-            for (int f = 0; f < normalizedFlex.Length; f++) //go through each finger -but- the thumb.?
+            for (int f = 0; f < normalizedFlex.Length; f++)
             {
-                res[f] = normalizedFlex[f] >= openHandThresholds[f] && normalizedFlex[f] <= closedHandThresholds[f];
+                res[f] = normalizedFlex[f] >= defaultOpen[f] && normalizedFlex[f] <= defaultClosed[f];
+            }
+            return res;
+        }
+
+        /// <summary> Instance-aware overload — uses the serialized per-instance thresholds. </summary>
+        protected bool[] GetGrabIntent(float[] normalizedFlex, float[] openThresh, float[] closedThresh)
+        {
+            bool[] res = new bool[5];
+            for (int f = 0; f < normalizedFlex.Length; f++)
+            {
+                res[f] = normalizedFlex[f] >= openThresh[f] && normalizedFlex[f] <= closedThresh[f];
             }
             return res;
         }
@@ -362,7 +390,7 @@ namespace SG
                     this.lastNormalized = currFlex;
                 }
             }
-            this.wantsGrab = GetGrabIntent(this.lastNormalized); //doing this here so I can evaluate from inspector
+            this.wantsGrab = GetGrabIntent(this.lastNormalized, this.openHandThresholds, this.closedHandThresholds);
 
             // Evaluate Grabbing / Releasing
             if (this.IsGrabbing) //Check for release - Gesture Based
