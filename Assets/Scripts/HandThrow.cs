@@ -46,6 +46,14 @@ namespace Basketball
         [Tooltip("Spin (angular velocity) magnitude applied to the ball on release for realistic backspin.")]
         [SerializeField] [Range(0f, 30f)] private float releaseSpinMagnitude = 12f;
 
+        [Header("Flight Physics Normalisation")]
+        [Tooltip("All balls are forced to this drag on release so they travel equal distances regardless of their Rigidbody settings.")]
+        [SerializeField] [Min(0f)] private float flightDrag = 0f;
+        [Tooltip("All balls are forced to this angular drag on release.")]
+        [SerializeField] [Min(0f)] private float flightAngularDrag = 0.05f;
+        [Tooltip("All balls are forced to this mass (kg) on release. Set to 0 to leave mass unchanged.")]
+        [SerializeField] [Min(0f)] private float flightMass = 0.625f;
+
         [Header("Game System")]
         [SerializeField] private BallThrower ballThrower;
 
@@ -223,6 +231,9 @@ namespace Basketball
 
             Vector3 releaseVelocity = PeakVelocity(velocityHistory) * velocityMultiplier;
 
+            // Normalise physics properties so all balls fly identically regardless of their Rigidbody setup.
+            NormaliseFlightPhysics(ballRb);
+
             // Apply the computed velocity directly to the ball for immediate, responsive feel.
             ballRb.velocity = releaseVelocity;
 
@@ -241,6 +252,19 @@ namespace Basketball
             _lastMovedTime[ballRb] = Time.time;
 
             Debug.Log($"[HandThrow] Ball released by {side} hand. Smoothed velocity: {releaseVelocity.magnitude:F2} m/s.");
+        }
+
+        /// <summary>
+        /// Forces the ball's drag, angular drag, and optionally mass to shared baseline values
+        /// so that every ball follows the same flight arc for the same release velocity.
+        /// </summary>
+        private void NormaliseFlightPhysics(Rigidbody rb)
+        {
+            rb.drag        = flightDrag;
+            rb.angularDrag = flightAngularDrag;
+
+            if (flightMass > 0f)
+                rb.mass = flightMass;
         }
 
         /// <summary>Returns true if the given Rigidbody belongs to one of the registered basketballs.</summary>

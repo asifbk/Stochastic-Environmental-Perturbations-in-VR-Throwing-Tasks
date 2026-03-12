@@ -15,6 +15,12 @@ namespace Basketball
         private const float DownwardVelocityThreshold = -0.5f;
 
         /// <summary>
+        /// Only Rigidbodies whose root GameObject carries this tag are considered valid balls.
+        /// Must match the tag assigned to your basketball prefab in the Unity Editor.
+        /// </summary>
+        [SerializeField] private string ballTag = "Ball";
+
+        /// <summary>
         /// Fired when a ball passes through the hoop.
         /// First argument is the scoring ball's GameObject, second is its entry speed in m/s.
         /// </summary>
@@ -24,6 +30,11 @@ namespace Basketball
         {
             Rigidbody rb = other.attachedRigidbody;
             if (rb == null)
+            {
+                return;
+            }
+
+            if (!rb.gameObject.CompareTag(ballTag))
             {
                 return;
             }
