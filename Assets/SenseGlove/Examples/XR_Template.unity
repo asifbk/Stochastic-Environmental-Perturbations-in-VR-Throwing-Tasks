@@ -1054,33 +1054,27 @@ PrefabInstance:
       propertyPath: m_LocalEulerAnglesHint.z
       value: 0
       objectReference: {fileID: 0}
-    - target: {fileID: 114541258151201158, guid: 10165189c26095442b2cefc1acb4c734,
-        type: 3}
+    - target: {fileID: 114541258151201158, guid: 10165189c26095442b2cefc1acb4c734, type: 3}
       propertyPath: origin
       value: 
       objectReference: {fileID: 0}
-    - target: {fileID: 114541258151201158, guid: 10165189c26095442b2cefc1acb4c734,
-        type: 3}
+    - target: {fileID: 114541258151201158, guid: 10165189c26095442b2cefc1acb4c734, type: 3}
       propertyPath: wristTrackingMethod
       value: 0
       objectReference: {fileID: 0}
-    - target: {fileID: 114541258151201158, guid: 10165189c26095442b2cefc1acb4c734,
-        type: 3}
+    - target: {fileID: 114541258151201158, guid: 10165189c26095442b2cefc1acb4c734, type: 3}
       propertyPath: wristTrackingOffsets
       value: 8
       objectReference: {fileID: 0}
-    - target: {fileID: 114741115281472756, guid: 10165189c26095442b2cefc1acb4c734,
-        type: 3}
+    - target: {fileID: 114741115281472756, guid: 10165189c26095442b2cefc1acb4c734, type: 3}
       propertyPath: origin
       value: 
       objectReference: {fileID: 0}
-    - target: {fileID: 114741115281472756, guid: 10165189c26095442b2cefc1acb4c734,
-        type: 3}
+    - target: {fileID: 114741115281472756, guid: 10165189c26095442b2cefc1acb4c734, type: 3}
       propertyPath: wristTrackingMethod
       value: 0
       objectReference: {fileID: 0}
-    - target: {fileID: 114741115281472756, guid: 10165189c26095442b2cefc1acb4c734,
-        type: 3}
+    - target: {fileID: 114741115281472756, guid: 10165189c26095442b2cefc1acb4c734, type: 3}
       propertyPath: wristTrackingOffsets
       value: 8
       objectReference: {fileID: 0}
