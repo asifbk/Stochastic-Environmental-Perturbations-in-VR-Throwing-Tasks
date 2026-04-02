@@ -8,39 +8,72 @@ namespace Basketball
 {
     /// <summary>
     /// Logs per-trial data to a CSV file for offline statistical analysis.
-    /// Each row represents one throw attempt with kinematic, environmental, and outcome data.
+    /// Each row represents one throw attempt with kinematic, environmental, outcome,
+    /// and SenseGlove finger-flexion data.
     ///
     /// CSV columns:
-    ///   TrialNumber, Timestamp, Hand, ReleaseVelocityX, ReleaseVelocityY, ReleaseVelocityZ,
-    ///   ReleaseSpeedMs, ReleaseAngleDeg, WindSpeedMs, WindSpeedKmh, WindAngleDeg,
-    ///   WindDirectionX, WindDirectionZ, EntrySpeedMs, Outcome
+    ///   ParticipantId, ConditionLabel, TrialNumber, SessionTimestamp,
+    ///   Hand,
+    ///   ReleasePosX, ReleasePosY, ReleasePosZ,
+    ///   ReleaseHeight,
+    ///   ReleaseVelocityX, ReleaseVelocityY, ReleaseVelocityZ,
+    ///   ReleaseSpeedMs, ReleaseAngleDeg,
+    ///   GrabDurationSec,
+    ///   FingerFlexThumb, FingerFlexIndex, FingerFlexMiddle, FingerFlexRing, FingerFlexPinky,
+    ///   WindSpeedMs, WindSpeedKmh, WindAngleDeg, WindDirectionX, WindDirectionZ,
+    ///   EntrySpeedMs, EntryVelocityX, EntryVelocityY, EntryVelocityZ,
+    ///   EntryAngleDeg,
+    ///   RimImpactSpeedMs,
+    ///   Outcome
     /// </summary>
     public class TrialDataLogger : MonoBehaviour
     {
+        // ─── CSV Header ───────────────────────────────────────────────────────────
+        private const string CsvHeader =
+            "ParticipantId,ConditionLabel,TrialNumber,SessionTimestamp," +
+            "Hand," +
+            "ReleasePosX,ReleasePosY,ReleasePosZ," +
+            "ReleaseHeight," +
+            "ReleaseVelocityX,ReleaseVelocityY,ReleaseVelocityZ," +
+            "ReleaseSpeedMs,ReleaseAngleDeg," +
+            "GrabDurationSec," +
+            "FingerFlexThumb,FingerFlexIndex,FingerFlexMiddle,FingerFlexRing,FingerFlexPinky," +
+            "WindSpeedMs,WindSpeedKmh,WindAngleDeg,WindDirectionX,WindDirectionZ," +
+            "EntrySpeedMs,EntryVelocityX,EntryVelocityY,EntryVelocityZ," +
+            "EntryAngleDeg," +
+            "RimImpactSpeedMs," +
+            "Outcome";
+
+        // ─── Inspector ────────────────────────────────────────────────────────────
         [Header("Data Sources")]
         [SerializeField] private HandThrow handThrow;
         [SerializeField] private BallThrower ballThrower;
         [SerializeField] private ScoringTrigger scoringTrigger;
         [SerializeField] private WindSystem windSystem;
 
-        [Header("Settings")]
-        [Tooltip("Seconds to wait for a score event after a throw before marking as Miss.")]
-        [SerializeField] [Min(1f)] private float scoreWindowSeconds = 5f;
-        [Tooltip("Participant ID written into the filename for experiment bookkeeping.")]
+        [Header("Reference Point")]
+        [Tooltip("World-space Y used as the floor reference for ReleaseHeight calculation. Typically the court floor level.")]
+        [SerializeField] private float floorReferenceY = 0f;
+
+        [Header("Session Metadata")]
+        [Tooltip("Participant ID written into every CSV row and the filename.")]
         [SerializeField] private string participantId = "P00";
 
-        private const string CsvHeader =
-            "TrialNumber,Timestamp,Hand,ReleaseVelocityX,ReleaseVelocityY,ReleaseVelocityZ," +
-            "ReleaseSpeedMs,ReleaseAngleDeg," +
-            "WindSpeedMs,WindSpeedKmh,WindAngleDeg,WindDirectionX,WindDirectionZ," +
-            "EntrySpeedMs,Outcome";
+        [Tooltip("Condition label written into every CSV row (e.g. 'Wind_NoPreview'). Change at runtime via SetCondition().")]
+        [SerializeField] private string conditionLabel = "Default";
 
-        // Pending trial state
-        private int _trialNumber;
-        private bool _awaitingScore;
-        private TrialRecord _pendingRecord;
+        [Header("Settings")]
+        [Tooltip("Seconds to wait for a score or rim-hit event after a throw before marking as Miss.")]
+        [SerializeField] [Min(1f)] private float scoreWindowSeconds = 5f;
+
+        // ─── Private State ────────────────────────────────────────────────────────
+        private int          _trialNumber;
+        private bool         _awaitingOutcome;
+        private TrialRecord  _pendingRecord;
         private StreamWriter _writer;
-        private float _sessionStartTime;
+        private float        _sessionStartTime;
+
+        // ─── Unity Lifecycle ──────────────────────────────────────────────────────
 
         private void Start()
         {
@@ -50,12 +83,14 @@ namespace Basketball
             if (handThrow != null)
                 handThrow.OnBallReleased += OnHandBallReleased;
 
-            // Also support keyboard throws from BallThrower
             if (ballThrower != null)
-                ballThrower.OnShotFired += OnKeyboardShotFired;
+                ballThrower.OnShotFired += OnAutoShotFired;
 
             if (scoringTrigger != null)
+            {
                 scoringTrigger.OnScored += OnScored;
+                scoringTrigger.OnRimHit += OnRimHit;
+            }
         }
 
         private void OnDestroy()
@@ -64,52 +99,79 @@ namespace Basketball
                 handThrow.OnBallReleased -= OnHandBallReleased;
 
             if (ballThrower != null)
-                ballThrower.OnShotFired -= OnKeyboardShotFired;
+                ballThrower.OnShotFired -= OnAutoShotFired;
 
             if (scoringTrigger != null)
+            {
                 scoringTrigger.OnScored -= OnScored;
+                scoringTrigger.OnRimHit -= OnRimHit;
+            }
 
             CloseFile();
         }
 
-        // --- Event Handlers ---
+        // ─── Public API ───────────────────────────────────────────────────────────
 
-        private void OnHandBallReleased(Vector3 releaseVelocity, HandThrow.HandSide side)
+        /// <summary>Updates the condition label written into subsequent CSV rows at runtime.</summary>
+        public void SetCondition(string label) => conditionLabel = label;
+
+        /// <summary>Updates the participant ID written into subsequent CSV rows and used in filenames.</summary>
+        public void SetParticipantId(string id) => participantId = id;
+
+        // ─── Event Handlers ───────────────────────────────────────────────────────
+
+        private void OnHandBallReleased(Vector3 releaseVelocity, HandThrow.HandSide side,
+                                        Vector3 releasePosition, float grabDuration,
+                                        float[] fingerFlexion)
         {
-            StartTrial(releaseVelocity, side.ToString());
+            StartTrial(releaseVelocity, side.ToString(), releasePosition, grabDuration, fingerFlexion);
         }
 
-        private void OnKeyboardShotFired()
+        private void OnAutoShotFired()
         {
-            // BallThrower computes the velocity; we can only approximate it here.
-            // For keyboard throws, release velocity is unknown so we log Vector3.zero.
-            StartTrial(Vector3.zero, "Keyboard");
+            // AutoShot computes velocity internally; we log Vector3.zero as release velocity.
+            StartTrial(Vector3.zero, "AutoShot", Vector3.zero, -1f, null);
         }
 
-        private void OnScored(GameObject ball, float entrySpeed)
+        private void OnScored(GameObject ball, float entrySpeed, Vector3 entryVelocity)
         {
-            if (!_awaitingScore) return;
+            if (!_awaitingOutcome) return;
 
-            _pendingRecord.EntrySpeedMs = entrySpeed;
-            _pendingRecord.Outcome = "Score";
-            _awaitingScore = false;
+            // Entry angle: angle between entry velocity and straight-down (0° = perfectly vertical).
+            float entryAngleDeg = Vector3.Angle(entryVelocity, Vector3.down);
+
+            _pendingRecord.EntrySpeedMs  = entrySpeed;
+            _pendingRecord.EntryVelocity = entryVelocity;
+            _pendingRecord.EntryAngleDeg = entryAngleDeg;
+            _pendingRecord.Outcome       = "Score";
+            _awaitingOutcome = false;
 
             FlushRecord(_pendingRecord);
         }
 
-        // --- Trial Lifecycle ---
-
-        /// <summary>Captures all pre-throw data and starts the score wait window.</summary>
-        private void StartTrial(Vector3 releaseVelocity, string hand)
+        private void OnRimHit(GameObject ball, float impactSpeed)
         {
-            // If a previous trial is still open, flush it as a miss first.
-            if (_awaitingScore)
-                FlushMiss();
+            if (!_awaitingOutcome) return;
+
+            // Record rim impact but keep the window open — ball may still score after a bounce.
+            _pendingRecord.RimImpactSpeedMs = impactSpeed;
+            _pendingRecord.Outcome          = "Rim";
+        }
+
+        // ─── Trial Lifecycle ──────────────────────────────────────────────────────
+
+        /// <summary>Captures all pre-throw data and starts the outcome wait window.</summary>
+        private void StartTrial(Vector3 releaseVelocity, string hand,
+                                 Vector3 releasePosition, float grabDuration,
+                                 float[] fingerFlexion)
+        {
+            if (_awaitingOutcome)
+                FlushPending();
 
             _trialNumber++;
 
             float horizontalSpeed = new Vector2(releaseVelocity.x, releaseVelocity.z).magnitude;
-            float releaseAngle = horizontalSpeed > 0.001f
+            float releaseAngleDeg = horizontalSpeed > 0.001f
                 ? Mathf.Atan2(releaseVelocity.y, horizontalSpeed) * Mathf.Rad2Deg
                 : 0f;
 
@@ -122,48 +184,55 @@ namespace Basketball
 
             _pendingRecord = new TrialRecord
             {
-                TrialNumber    = _trialNumber,
-                Timestamp      = Time.time - _sessionStartTime,
-                Hand           = hand,
-                ReleaseVelocity = releaseVelocity,
-                ReleaseSpeedMs = releaseVelocity.magnitude,
-                ReleaseAngleDeg = releaseAngle,
-                WindSpeedMs    = windSystem != null ? windSystem.WindSpeedMs : 0f,
-                WindSpeedKmh   = windSystem != null ? windSystem.WindSpeedKmh : 0f,
-                WindAngleDeg   = windSystem != null ? windSystem.WindAngleDeg : 0f,
-                WindDirectionX = windDir.x,
-                WindDirectionZ = windDir.z,
-                EntrySpeedMs   = -1f,
-                Outcome        = "Miss"
+                ParticipantId    = participantId,
+                ConditionLabel   = conditionLabel,
+                TrialNumber      = _trialNumber,
+                SessionTimestamp = Time.time - _sessionStartTime,
+                Hand             = hand,
+                ReleasePosition  = releasePosition,
+                ReleaseHeight    = releasePosition.y - floorReferenceY,
+                ReleaseVelocity  = releaseVelocity,
+                ReleaseSpeedMs   = releaseVelocity.magnitude,
+                ReleaseAngleDeg  = releaseAngleDeg,
+                GrabDurationSec  = grabDuration,
+                FingerFlexion    = fingerFlexion,
+                WindSpeedMs      = windSystem != null ? windSystem.WindSpeedMs  : 0f,
+                WindSpeedKmh     = windSystem != null ? windSystem.WindSpeedKmh : 0f,
+                WindAngleDeg     = windSystem != null ? windSystem.WindAngleDeg : 0f,
+                WindDirectionX   = windDir.x,
+                WindDirectionZ   = windDir.z,
+                EntrySpeedMs     = -1f,
+                EntryVelocity    = Vector3.zero,
+                EntryAngleDeg    = -1f,
+                RimImpactSpeedMs = -1f,
+                Outcome          = "Miss"
             };
 
-            _awaitingScore = true;
-            StartCoroutine(ScoreWindowCoroutine());
+            _awaitingOutcome = true;
+            StartCoroutine(OutcomeWindowCoroutine());
         }
 
-        private IEnumerator ScoreWindowCoroutine()
+        private IEnumerator OutcomeWindowCoroutine()
         {
             yield return new WaitForSeconds(scoreWindowSeconds);
-
-            if (_awaitingScore)
-                FlushMiss();
+            if (_awaitingOutcome)
+                FlushPending();
         }
 
-        private void FlushMiss()
+        private void FlushPending()
         {
-            _awaitingScore = false;
-            _pendingRecord.Outcome = "Miss";
+            _awaitingOutcome = false;
             FlushRecord(_pendingRecord);
         }
 
-        // --- CSV I/O ---
+        // ─── CSV I/O ──────────────────────────────────────────────────────────────
 
         private void OpenFile()
         {
             string directory = Application.persistentDataPath;
             string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-            string filename = $"basketball_trials_{participantId}_{timestamp}.csv";
-            string path = Path.Combine(directory, filename);
+            string filename  = $"basketball_trials_{participantId}_{timestamp}.csv";
+            string path      = Path.Combine(directory, filename);
 
             try
             {
@@ -182,19 +251,39 @@ namespace Basketball
         {
             if (_writer == null) return;
 
-            string line = string.Format(
-                "{0},{1:F3},{2},{3:F4},{4:F4},{5:F4},{6:F4},{7:F2}," +
-                "{8:F4},{9:F4},{10:F2},{11:F4},{12:F4}," +
-                "{13:F4},{14}",
+            // Finger flexion: write -1 per finger if data is unavailable.
+            string FlexStr(int i) => r.FingerFlexion != null && i < r.FingerFlexion.Length
+                ? r.FingerFlexion[i].ToString("F4")
+                : "-1";
+
+            string line = string.Join(",",
+                r.ParticipantId,
+                r.ConditionLabel,
                 r.TrialNumber,
-                r.Timestamp,
+                r.SessionTimestamp.ToString("F3"),
                 r.Hand,
-                r.ReleaseVelocity.x, r.ReleaseVelocity.y, r.ReleaseVelocity.z,
-                r.ReleaseSpeedMs,
-                r.ReleaseAngleDeg,
-                r.WindSpeedMs, r.WindSpeedKmh, r.WindAngleDeg,
-                r.WindDirectionX, r.WindDirectionZ,
-                r.EntrySpeedMs,
+                r.ReleasePosition.x.ToString("F4"),
+                r.ReleasePosition.y.ToString("F4"),
+                r.ReleasePosition.z.ToString("F4"),
+                r.ReleaseHeight.ToString("F4"),
+                r.ReleaseVelocity.x.ToString("F4"),
+                r.ReleaseVelocity.y.ToString("F4"),
+                r.ReleaseVelocity.z.ToString("F4"),
+                r.ReleaseSpeedMs.ToString("F4"),
+                r.ReleaseAngleDeg.ToString("F2"),
+                r.GrabDurationSec.ToString("F3"),
+                FlexStr(0), FlexStr(1), FlexStr(2), FlexStr(3), FlexStr(4),
+                r.WindSpeedMs.ToString("F4"),
+                r.WindSpeedKmh.ToString("F4"),
+                r.WindAngleDeg.ToString("F2"),
+                r.WindDirectionX.ToString("F4"),
+                r.WindDirectionZ.ToString("F4"),
+                r.EntrySpeedMs.ToString("F4"),
+                r.EntryVelocity.x.ToString("F4"),
+                r.EntryVelocity.y.ToString("F4"),
+                r.EntryVelocity.z.ToString("F4"),
+                r.EntryAngleDeg.ToString("F2"),
+                r.RimImpactSpeedMs.ToString("F4"),
                 r.Outcome);
 
             try
@@ -221,23 +310,32 @@ namespace Basketball
             }
         }
 
-        // --- Data Transfer Object ---
+        // ─── Data Transfer Object ─────────────────────────────────────────────────
 
         private struct TrialRecord
         {
-            public int TrialNumber;
-            public float Timestamp;
-            public string Hand;
+            public string  ParticipantId;
+            public string  ConditionLabel;
+            public int     TrialNumber;
+            public float   SessionTimestamp;
+            public string  Hand;
+            public Vector3 ReleasePosition;
+            public float   ReleaseHeight;
             public Vector3 ReleaseVelocity;
-            public float ReleaseSpeedMs;
-            public float ReleaseAngleDeg;
-            public float WindSpeedMs;
-            public float WindSpeedKmh;
-            public float WindAngleDeg;
-            public float WindDirectionX;
-            public float WindDirectionZ;
-            public float EntrySpeedMs;
-            public string Outcome;
+            public float   ReleaseSpeedMs;
+            public float   ReleaseAngleDeg;
+            public float   GrabDurationSec;
+            public float[] FingerFlexion;      // [Thumb, Index, Middle, Ring, Pinky] 0–1
+            public float   WindSpeedMs;
+            public float   WindSpeedKmh;
+            public float   WindAngleDeg;
+            public float   WindDirectionX;
+            public float   WindDirectionZ;
+            public float   EntrySpeedMs;
+            public Vector3 EntryVelocity;
+            public float   EntryAngleDeg;
+            public float   RimImpactSpeedMs;
+            public string  Outcome;            // "Score" | "Rim" | "Miss"
         }
     }
 }

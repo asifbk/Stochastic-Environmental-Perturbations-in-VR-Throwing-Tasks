@@ -19,6 +19,12 @@ namespace Basketball
         [SerializeField] private SG_PhysicsGrab rightHandGrab;
         [SerializeField] private SG_PhysicsGrab leftHandGrab;
 
+        [Header("SenseGlove Tracked Hands (for finger flexion logging)")]
+        [Tooltip("SG_TrackedHand on the right SGHand. Used to capture finger flexion at release.")]
+        [SerializeField] private SG_TrackedHand rightTrackedHand;
+        [Tooltip("SG_TrackedHand on the left SGHand. Used to capture finger flexion at release.")]
+        [SerializeField] private SG_TrackedHand leftTrackedHand;
+
         [Header("Wrist Trackers (XR controller / tracker Transforms, NOT physics Rigidbodies)")]
         [Tooltip("The actual tracked Transform of the right wrist — used for true hand velocity, bypassing spring lag.")]
         [SerializeField] private Transform rightWristTracker;
@@ -57,9 +63,7 @@ namespace Basketball
         [Header("Game System")]
         [SerializeField] private BallThrower ballThrower;
 
-        // Ring buffers — one unified buffer per hand. Tracker position-delta is preferred;
-        // Rigidbody velocity is the fallback. Only ONE is written per frame per hand,
-        // so the index increments exactly once per frame and the buffer stays fully populated.
+        // Ring buffers — one unified buffer per hand.
         private readonly Vector3[] _rightVelocityHistory = new Vector3[VelocityHistorySize];
         private readonly Vector3[] _leftVelocityHistory  = new Vector3[VelocityHistorySize];
         private int _rightHistoryIndex;
@@ -75,29 +79,47 @@ namespace Basketball
         private readonly Dictionary<Rigidbody, float> _lastMovedTime = new Dictionary<Rigidbody, float>();
         private static readonly float VelocitySleepThreshold = 0.05f;
 
+        // Per-ball grab start times for time-on-task measurement.
+        private readonly Dictionary<Rigidbody, float> _grabStartTimes = new Dictionary<Rigidbody, float>();
+
         /// <summary>
-        /// Fired when the player releases a ball. Carries the smoothed release velocity and which hand was used.
+        /// Fired when the player releases a ball.
+        /// Carries the smoothed release velocity, which hand was used, the release world position,
+        /// the grab-to-release duration, and per-finger normalized flexion (Thumb→Pinky, 0=open 1=closed).
+        /// Finger flexion array is null if no SG_TrackedHand is assigned.
         /// </summary>
-        public event System.Action<Vector3, HandSide> OnBallReleased;
+        public event System.Action<Vector3, HandSide, Vector3, float, float[]> OnBallReleased;
 
         public enum HandSide { Left, Right }
 
         private void OnEnable()
         {
             if (rightHandGrab != null)
+            {
+                rightHandGrab.GrabbedObject.AddListener(OnRightHandGrabbed);
                 rightHandGrab.ReleasedObject.AddListener(OnRightHandReleased);
+            }
 
             if (leftHandGrab != null)
+            {
+                leftHandGrab.GrabbedObject.AddListener(OnLeftHandGrabbed);
                 leftHandGrab.ReleasedObject.AddListener(OnLeftHandReleased);
+            }
         }
 
         private void OnDisable()
         {
             if (rightHandGrab != null)
+            {
+                rightHandGrab.GrabbedObject.RemoveListener(OnRightHandGrabbed);
                 rightHandGrab.ReleasedObject.RemoveListener(OnRightHandReleased);
+            }
 
             if (leftHandGrab != null)
+            {
+                leftHandGrab.GrabbedObject.RemoveListener(OnLeftHandGrabbed);
                 leftHandGrab.ReleasedObject.RemoveListener(OnLeftHandReleased);
+            }
         }
 
         private void Start()
@@ -114,8 +136,6 @@ namespace Basketball
 
         private void Update()
         {
-            // Each hand samples exactly one source per frame — tracker (preferred) or Rigidbody (fallback).
-            // This ensures the index increments once per frame and the buffer stays fully populated.
             SampleVelocity(rightWristTracker, rightHandRigidbody,
                            ref _rightTrackerLastPos, ref _rightTrackerInitialized,
                            _rightVelocityHistory, ref _rightHistoryIndex);
@@ -149,10 +169,28 @@ namespace Basketball
             }
         }
 
+        // ─── Grab events ──────────────────────────────────────────────────────────
+
+        private void OnRightHandGrabbed(SG_Interactable interactable, SG_GrabScript grabScript)
+            => RecordGrabStart(interactable);
+
+        private void OnLeftHandGrabbed(SG_Interactable interactable, SG_GrabScript grabScript)
+            => RecordGrabStart(interactable);
+
+        /// <summary>Stamps the grab start time so we can compute time-on-task at release.</summary>
+        private void RecordGrabStart(SG_Interactable interactable)
+        {
+            if (interactable == null) return;
+            Rigidbody rb = interactable.GetComponent<Rigidbody>();
+            if (rb == null || !IsBall(rb)) return;
+            _grabStartTimes[rb] = Time.time;
+        }
+
+        // ─── Velocity sampling ────────────────────────────────────────────────────
+
         /// <summary>
         /// Samples velocity for one hand into its unified buffer — exactly once per frame.
         /// Prefers the XR wrist tracker (position delta) over the Rigidbody velocity to bypass SG spring lag.
-        /// Initialises last-position on the first frame so the first sample is not a world-origin spike.
         /// </summary>
         private static void SampleVelocity(
             Transform tracker, Rigidbody fallbackRb,
@@ -165,7 +203,6 @@ namespace Basketball
             {
                 if (!initialized)
                 {
-                    // Seed last position to current position — prevents a huge spike on frame 1.
                     lastTrackerPos = tracker.position;
                     initialized = true;
                     velocity = Vector3.zero;
@@ -191,7 +228,7 @@ namespace Basketball
             index = (index + 1) % buffer.Length;
         }
 
-        /// <summary>Returns the vector with the highest magnitude from the history buffer — preserves peak throw speed.</summary>
+        /// <summary>Returns the vector with the highest magnitude from the history buffer.</summary>
         private static Vector3 PeakVelocity(Vector3[] buffer)
         {
             Vector3 peak = Vector3.zero;
@@ -208,21 +245,24 @@ namespace Basketball
             return peak;
         }
 
+        // ─── Release events ───────────────────────────────────────────────────────
+
         private void OnRightHandReleased(SG_Interactable interactable, SG_GrabScript grabScript)
         {
-            HandleRelease(interactable, _rightVelocityHistory, HandSide.Right);
+            HandleRelease(interactable, _rightVelocityHistory, HandSide.Right, rightTrackedHand);
         }
 
         private void OnLeftHandReleased(SG_Interactable interactable, SG_GrabScript grabScript)
         {
-            HandleRelease(interactable, _leftVelocityHistory, HandSide.Left);
+            HandleRelease(interactable, _leftVelocityHistory, HandSide.Left, leftTrackedHand);
         }
 
         /// <summary>
-        /// Checks whether the released interactable is a basketball, applies smoothed release
-        /// velocity + backspin, and records the shot.
+        /// Applies smoothed release velocity + backspin, records the shot, and fires OnBallReleased
+        /// with position, time-on-task, and finger flexion data for the logger.
         /// </summary>
-        private void HandleRelease(SG_Interactable interactable, Vector3[] velocityHistory, HandSide side)
+        private void HandleRelease(SG_Interactable interactable, Vector3[] velocityHistory,
+                                   HandSide side, SG_TrackedHand trackedHand)
         {
             if (interactable == null) return;
 
@@ -230,34 +270,60 @@ namespace Basketball
             if (ballRb == null || !IsBall(ballRb)) return;
 
             Vector3 releaseVelocity = PeakVelocity(velocityHistory) * velocityMultiplier;
+            Vector3 releasePosition = ballRb.position;
 
-            // Normalise physics properties so all balls fly identically regardless of their Rigidbody setup.
+            // Time-on-task: seconds from grab to release.
+            float grabDuration = _grabStartTimes.TryGetValue(ballRb, out float grabStart)
+                ? Time.time - grabStart
+                : -1f;
+
+            // Per-finger normalized flexion at release (Thumb=0 … Pinky=4). 0=open, 1=closed.
+            float[] fingerFlexion = SampleFingerFlexion(trackedHand);
+
             NormaliseFlightPhysics(ballRb);
-
-            // Apply the computed velocity directly to the ball for immediate, responsive feel.
             ballRb.velocity = releaseVelocity;
 
-            // Add backspin for realistic basketball physics: spin axis is perpendicular to throw direction.
             if (releaseVelocity.magnitude > 0.1f && releaseSpinMagnitude > 0f)
             {
-                Vector3 throwDir   = releaseVelocity.normalized;
-                Vector3 spinAxis   = Vector3.Cross(throwDir, Vector3.up).normalized;
+                Vector3 throwDir  = releaseVelocity.normalized;
+                Vector3 spinAxis  = Vector3.Cross(throwDir, Vector3.up).normalized;
                 ballRb.angularVelocity = spinAxis * releaseSpinMagnitude;
             }
 
             if (ballThrower != null)
                 ballThrower.RecordShot();
 
-            OnBallReleased?.Invoke(releaseVelocity, side);
+            OnBallReleased?.Invoke(releaseVelocity, side, releasePosition, grabDuration, fingerFlexion);
             _lastMovedTime[ballRb] = Time.time;
 
-            Debug.Log($"[HandThrow] Ball released by {side} hand. Smoothed velocity: {releaseVelocity.magnitude:F2} m/s.");
+            Debug.Log($"[HandThrow] Ball released by {side} hand. Speed: {releaseVelocity.magnitude:F2} m/s. " +
+                      $"GrabDuration: {grabDuration:F2}s.");
         }
 
+        // ─── SenseGlove finger flexion ────────────────────────────────────────────
+
         /// <summary>
-        /// Forces the ball's drag, angular drag, and optionally mass to shared baseline values
-        /// so that every ball follows the same flight arc for the same release velocity.
+        /// Returns per-finger normalized flexion [Thumb, Index, Middle, Ring, Pinky] in 0–1 range
+        /// from SG_HandPose.normalizedFlexion. Returns null if no tracked hand is available.
         /// </summary>
+        private static float[] SampleFingerFlexion(SG_TrackedHand trackedHand)
+        {
+            if (trackedHand == null) return null;
+
+            SG_HandPose pose = trackedHand.RealHandPose;
+            if (pose == null || pose.normalizedFlexion == null) return null;
+
+            const int fingerCount = 5;
+            float[] flexion = new float[fingerCount];
+            for (int f = 0; f < fingerCount && f < pose.normalizedFlexion.Length; f++)
+                flexion[f] = pose.normalizedFlexion[f];
+
+            return flexion;
+        }
+
+        // ─── Physics helpers ──────────────────────────────────────────────────────
+
+        /// <summary>Forces the ball's drag, angular drag, and mass to shared baseline values.</summary>
         private void NormaliseFlightPhysics(Rigidbody rb)
         {
             rb.drag        = flightDrag;

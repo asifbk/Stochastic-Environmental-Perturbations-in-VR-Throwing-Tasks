@@ -3,8 +3,10 @@ using UnityEngine;
 namespace Basketball
 {
     /// <summary>
-    /// Simulates ambient wind by applying a time-varying horizontal force to registered ball Rigidbodies.
-    /// Speed and direction update at a configurable interval to replicate natural wind gusts.
+    /// Provides wind speed and direction for ball physics and flag cloth simulation.
+    /// When a FlagRotationController is assigned, its Y-axis rotation is the authoritative
+    /// wind direction and the random vane-snapping is disabled. Wind speed still varies
+    /// randomly over time.
     /// </summary>
     public class WindSystem : MonoBehaviour
     {
@@ -13,16 +15,36 @@ namespace Basketball
         [SerializeField] private float windVariation = 2f;
         [SerializeField] [Min(0.5f)] private float windChangeInterval = 4f;
 
+        [Header("Flag Direction Source")]
+        [Tooltip("When assigned, the wind direction is read directly from the flag's Y rotation. "
+               + "The WindVane child and random-axis logic are not used.")]
+        [SerializeField] private FlagRotationController flagRotationController;
+
+        [Header("Wind Vane (fallback)")]
+        [Tooltip("Used only when FlagRotationController is not assigned. "
+               + "The WindVane pivot Transform child of the Flag.")]
+        [SerializeField] private Transform windVane;
+
         [Header("Ball Targets")]
         [SerializeField] private Rigidbody[] ballRigidbodies;
 
         private float _currentWindSpeed;
-        private float _currentWindAngleDeg;
-        private Vector3 _currentWindDirection;
         private float _nextChangeTime;
 
-        /// <summary>Current normalised wind direction in world-space XZ plane.</summary>
-        public Vector3 WindDirection => _currentWindDirection;
+        /// <summary>Current wind direction as a horizontal unit vector.</summary>
+        public Vector3 WindDirection
+        {
+            get
+            {
+                if (flagRotationController != null)
+                    return flagRotationController.WindDirection;
+
+                if (windVane != null)
+                    return new Vector3(windVane.forward.x, 0f, windVane.forward.z).normalized;
+
+                return Vector3.forward;
+            }
+        }
 
         /// <summary>Current wind speed in metres per second.</summary>
         public float WindSpeedMs => _currentWindSpeed;
@@ -31,60 +53,48 @@ namespace Basketball
         public float WindSpeedKmh => _currentWindSpeed * 3.6f;
 
         /// <summary>Horizontal wind angle in degrees (0 = world +X, 90 = world +Z).</summary>
-        public float WindAngleDeg => _currentWindAngleDeg;
+        public float WindAngleDeg =>
+            Mathf.Atan2(WindDirection.z, WindDirection.x) * Mathf.Rad2Deg;
 
-        private void Start()
+        /// <summary>Compass cardinal string for the current wind direction.</summary>
+        public string WindCardinal()
         {
-            ApplyNewWind();
+            float a = (WindAngleDeg % 360f + 360f) % 360f;
+            string[] cardinals = { "E", "NE", "N", "NW", "W", "SW", "S", "SE" };
+            return cardinals[Mathf.RoundToInt(a / 45f) % 8];
         }
+
+        private void Start() => RollNewWindSpeed();
 
         private void Update()
         {
             if (Time.time >= _nextChangeTime)
-            {
-                ApplyNewWind();
-            }
+                RollNewWindSpeed();
         }
 
         private void FixedUpdate()
         {
-            if (_currentWindSpeed < 0.01f || ballRigidbodies == null)
-            {
-                return;
-            }
+            if (_currentWindSpeed < 0.01f || ballRigidbodies == null) return;
 
-            // Scale wind to a light but noticeable force (basketball mass ~0.62 kg)
-            Vector3 windForce = _currentWindDirection * (_currentWindSpeed * 0.08f);
+            // Apply a downward-biased wind force: horizontal component matches flag direction,
+            // plus a small downward push so balls drift into the ground in the wind direction.
+            Vector3 horizontal = WindDirection * (_currentWindSpeed * 0.08f);
+            Vector3 downwardBias = Vector3.down * (_currentWindSpeed * 0.02f);
+            Vector3 windForce = horizontal + downwardBias;
 
             foreach (Rigidbody rb in ballRigidbodies)
             {
                 if (rb != null && !rb.isKinematic && !rb.IsSleeping())
-                {
                     rb.AddForce(windForce, ForceMode.Force);
-                }
             }
         }
 
-        /// <summary>
-        /// Randomises wind speed and direction within configured bounds.
-        /// </summary>
-        private void ApplyNewWind()
+        /// <summary>Rolls a new wind speed. Direction is now dictated by the flag rotation.</summary>
+        private void RollNewWindSpeed()
         {
             _currentWindSpeed = Mathf.Max(0f, baseWindSpeed + Random.Range(-windVariation, windVariation));
-            _currentWindAngleDeg = Random.Range(0f, 360f);
-
-            float angleRad = _currentWindAngleDeg * Mathf.Deg2Rad;
-            _currentWindDirection = new Vector3(Mathf.Cos(angleRad), 0f, Mathf.Sin(angleRad));
-
             _nextChangeTime = Time.time + windChangeInterval;
-        }
-
-        /// <summary>Returns a compass cardinal string for the current wind angle.</summary>
-        public string WindCardinal()
-        {
-            string[] cardinals = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
-            int index = Mathf.RoundToInt(_currentWindAngleDeg / 45f) % 8;
-            return cardinals[index];
         }
     }
 }
+

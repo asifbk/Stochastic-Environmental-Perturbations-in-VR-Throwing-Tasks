@@ -51,7 +51,7 @@ namespace Basketball
             RefreshDisplay();
         }
 
-        private void HandleScored(GameObject ball, float entrySpeed)
+        private void HandleScored(GameObject ball, float entrySpeed, Vector3 entryVelocity)
         {
             _totalScore += PointsPerBasket;
             _lastEntrySpeed = entrySpeed;
