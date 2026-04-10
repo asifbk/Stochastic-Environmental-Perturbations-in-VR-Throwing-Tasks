@@ -54,6 +54,10 @@ namespace Basketball
         [Header("Coach Visuals")]
         [SerializeField] private CoachVisuals coachVisuals;
 
+        [Header("Text-to-Speech")]
+        [Tooltip("Optional CoachTTSClient component on this GameObject. When assigned the coach will speak its response aloud.")]
+        [SerializeField] private CoachTTSClient coachTTS;
+
         [Header("Timing")]
         [SerializeField] private float feedbackDisplaySeconds = 10f;
         [SerializeField] private float outcomeWaitSeconds     = 2f;
@@ -432,12 +436,18 @@ namespace Basketball
                 _hideCoroutine = null;
             }
 
+            bool hasResponse = !string.IsNullOrEmpty(response);
+
             if (coachText != null)
             {
-                coachText.text = string.IsNullOrEmpty(response)
-                    ? "[Coach offline — is Ollama running? Check the model name in OllamaVLMClient.]"
-                    : response;
+                coachText.text = hasResponse
+                    ? response
+                    : "[Coach offline — is Ollama running? Check the model name in OllamaVLMClient.]";
             }
+
+            // Speak the response aloud when TTS is configured and there is valid text.
+            if (coachTTS != null && hasResponse)
+                coachTTS.Speak(response);
         }
 
         private IEnumerator HideAfterDelay(float delay)
@@ -455,6 +465,7 @@ namespace Basketball
                 coachText.text = string.Empty;
 
             coachVisuals?.Hide();
+            coachTTS?.StopSpeaking();
         }
 
         /// <summary>
