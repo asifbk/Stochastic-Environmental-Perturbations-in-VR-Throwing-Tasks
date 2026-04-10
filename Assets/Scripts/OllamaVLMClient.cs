@@ -19,20 +19,20 @@ namespace Basketball
         
         /// <summary>Maximum time (in seconds) to wait for ANY request, including the network timeout.
         /// Acts as a safety net to ensure IsBusy is always cleared.</summary>
-        private const float MaxTotalWaitSeconds = 150f;
+        private const float MaxTotalWaitSeconds = 360f;
 
         /// <summary>Base URL of the local Ollama server.</summary>
         [SerializeField] private string ollamaBaseUrl = "http://localhost:11434";
 
         /// <summary>
-        /// Ollama model name. Use a vision-capable model (e.g. "llava", "llava:13b",
-        /// "bakllava") when calling SendVisionRequest.
+        /// Ollama model name. Use a vision-capable model (e.g. "llava:7b", "llava:13b")
+        /// when calling SendVisionRequest.
         /// </summary>
-        [SerializeField] private string modelName = "llava";
+        [SerializeField] private string modelName = "moondream";
 
         /// <summary>Seconds before the UnityWebRequest is abandoned (network timeout).
-        /// Vision models (llava) typically need 90–120 s depending on hardware and image size.</summary>
-        [SerializeField] private float timeoutSeconds = 120f;
+        /// moondream (~1.7 GB) runs fully on GPU and typically responds in 5–15 s.</summary>
+        [SerializeField] private float timeoutSeconds = 60f;
 
         /// <summary>True while a request is in flight. New requests are rejected until this clears.</summary>
         public bool IsBusy { get; private set; }
@@ -73,16 +73,33 @@ namespace Basketball
                 return;
             }
 
-            // Encode to JPEG — quality 50 keeps the file small (~30 KB) without losing
-            // court geometry detail that llava needs for coaching feedback.
+            // Downscale to MaxImageSize on the longest side before encoding.
+            // Keeping the image small reduces VRAM usage during llava vision inference.
+            const int MaxImageSize = 256;
             byte[] jpegBytes = null;
             string imageBase64 = null;
-            
+
             try
             {
-                jpegBytes = texture.EncodeToJPG(quality: 50);
+                Texture2D toEncode = texture;
+                bool createdResized = false;
+
+                if (texture.width > MaxImageSize || texture.height > MaxImageSize)
+                {
+                    float scale = MaxImageSize / (float)Mathf.Max(texture.width, texture.height);
+                    int   w     = Mathf.Max(1, Mathf.RoundToInt(texture.width  * scale));
+                    int   h     = Mathf.Max(1, Mathf.RoundToInt(texture.height * scale));
+                    toEncode = ResizeTexture(texture, w, h);
+                    createdResized = true;
+                    Debug.Log($"[OllamaClient] Screenshot scaled {texture.width}×{texture.height} → {w}×{h}.");
+                }
+
+                jpegBytes = toEncode.EncodeToJPG(quality: 25);
                 imageBase64 = Convert.ToBase64String(jpegBytes);
                 Debug.Log($"[OllamaClient] Image encoded — {jpegBytes.Length / 1024} KB JPEG.");
+
+                if (createdResized)
+                    UnityEngine.Object.Destroy(toEncode);
             }
             catch (Exception ex)
             {
@@ -178,6 +195,7 @@ namespace Basketball
         /// <summary>
         /// Builds the Ollama /api/generate JSON payload.
         /// When imageBase64 is provided the "images" array is included (vision models only).
+        /// num_ctx caps the KV-cache size to reduce VRAM usage; num_predict limits response length.
         /// </summary>
         private string BuildRequestJson(string prompt, string imageBase64)
         {
@@ -187,7 +205,8 @@ namespace Basketball
             sb.Append($"\"prompt\":{JsonEscape(prompt)},");
             if (imageBase64 != null)
                 sb.Append($"\"images\":[\"{imageBase64}\"],");
-            sb.Append("\"stream\":false");
+            sb.Append("\"stream\":false,");
+            sb.Append("\"options\":{\"num_ctx\":2048,\"num_predict\":200}");
             sb.Append("}");
             return sb.ToString();
         }
@@ -205,6 +224,28 @@ namespace Basketball
                 Debug.LogError($"[OllamaClient] Failed to parse response JSON: {ex.Message}\nRaw: {json}");
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Blits the source texture into a new Texture2D of the given dimensions using a
+        /// RenderTexture, which works even when the source is not CPU-readable.
+        /// Caller is responsible for destroying the returned texture when done.
+        /// </summary>
+        private static Texture2D ResizeTexture(Texture2D source, int width, int height)
+        {
+            RenderTexture rt  = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
+            RenderTexture prev = RenderTexture.active;
+            RenderTexture.active = rt;
+
+            Graphics.Blit(source, rt);
+
+            Texture2D result = new Texture2D(width, height, TextureFormat.RGB24, mipChain: false);
+            result.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+            result.Apply();
+
+            RenderTexture.active = prev;
+            RenderTexture.ReleaseTemporary(rt);
+            return result;
         }
 
         /// <summary>Wraps a string in JSON quotes and escapes unsafe characters.</summary>

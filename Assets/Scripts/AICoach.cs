@@ -35,6 +35,10 @@ namespace Basketball
         [Tooltip("Transform at the centre of the hoop opening (HoopScoreTrigger GameObject).")]
         [SerializeField] private Transform hoopTransform;
 
+        [Tooltip("Player head/body transform used to place the floor marker at the player's feet. " +
+                 "Assign the VR Camera (e.g. [CameraRig]/Camera).")]
+        [SerializeField] private Transform playerTransform;
+
         [Header("Balls")]
         [Tooltip("All basketball Rigidbodies — used to sample velocity when SenseGlove release event is unavailable.")]
         [SerializeField] private Rigidbody[] ballRigidbodies;
@@ -46,6 +50,9 @@ namespace Basketball
 
         [Header("Coach UI")]
         [SerializeField] private TextMeshProUGUI coachText;
+
+        [Header("Coach Visuals")]
+        [SerializeField] private CoachVisuals coachVisuals;
 
         [Header("Timing")]
         [SerializeField] private float feedbackDisplaySeconds = 10f;
@@ -145,7 +152,8 @@ namespace Basketball
 
         private void Update()
         {
-            // Space key: manual trigger for editor testing.
+            // Space key: manual trigger for editor testing — only fires if at least one
+            // real shot has been committed to history so the prompt has meaningful data.
 #if ENABLE_INPUT_SYSTEM
             bool spaceDown = Keyboard.current != null && Keyboard.current.spaceKey.wasPressedThisFrame;
 #else
@@ -153,6 +161,14 @@ namespace Basketball
 #endif
             if (spaceDown)
             {
+                if (_history.Count == 0)
+                {
+                    Debug.LogWarning("[AICoach] Space pressed but no shots in history yet — throw the ball first.");
+                    if (coachText != null)
+                        coachText.text = "Throw the ball first!";
+                    return;
+                }
+
                 Debug.Log("[AICoach] Manual query triggered via Space key.");
                 QueryModel();
             }
@@ -286,6 +302,17 @@ namespace Basketball
             if (_history.Count > MaxShotHistory)
                 _history.Dequeue();
 
+            // Show visual guidance based on pre-computed physics — no LLM parsing needed.
+            if (coachVisuals != null && hoopTransform != null)
+            {
+                (float idealAngle, float idealSpeed) = ComputeIdealShot(_pending.ReleasePosition);
+                Vector3 playerPos = playerTransform != null
+                    ? playerTransform.position
+                    : _pending.ReleasePosition;
+                coachVisuals.ShowGuidance(playerPos, _pending.ReleasePosition,
+                                          hoopTransform.position, idealAngle, idealSpeed);
+            }
+
             QueryModel();
         }
 
@@ -350,123 +377,47 @@ namespace Basketball
         {
             StringBuilder sb = new StringBuilder();
 
-            // ── System role ──────────────────────────────────────────────────────
-            sb.AppendLine("You are an AI basketball shooting coach embedded in a VR training simulation.");
-            sb.AppendLine("You receive precise sensor data from every throw. Your job is to analyse the data");
-            sb.AppendLine("and output EXACTLY three coaching instructions:");
-            sb.AppendLine("  1. Position adjustment — how many metres to move forward/back and left/right from the current release spot.");
-            sb.AppendLine("  2. Release angle — the optimal angle above horizontal in degrees.");
-            sb.AppendLine("  3. Release speed — the optimal speed in m/s.");
-            sb.AppendLine("Be direct and specific. Use numbers. Keep each instruction to one sentence.");
-            sb.AppendLine("Do NOT add preamble, explanation, or extra text beyond the three numbered points.");
+            // ── System role (concise) ─────────────────────────────────────────────
+            sb.AppendLine("You are a VR basketball coach. Respond with ONLY 3 numbered instructions:");
+            sb.AppendLine("1. Position: move Xm forward/back and Ym left/right.");
+            sb.AppendLine("2. Angle: release at X° above horizontal.");
+            sb.AppendLine("3. Speed: throw at X m/s. No extra text.");
             sb.AppendLine();
 
-            // ── Court context ────────────────────────────────────────────────────
-            sb.AppendLine("=== COURT CONTEXT ===");
+            // ── Court context ─────────────────────────────────────────────────────
             if (hoopTransform != null)
             {
-                Vector3 hoopPos    = hoopTransform.position;
-                Vector3 releasePos = _pending.ReleasePosition;
-
-                Vector3 toHoop         = hoopPos - releasePos;
+                (float idealAngle, float minSpeed) = ComputeIdealShot(_pending.ReleasePosition);
+                Vector3 toHoop         = hoopTransform.position - _pending.ReleasePosition;
                 float   horizontalDist = new Vector2(toHoop.x, toHoop.z).magnitude;
-                float   heightDiff     = hoopPos.y - releasePos.y;
-
-                // Angle from release to hoop relative to world forward.
-                float horizontalAngle = Mathf.Atan2(toHoop.x, toHoop.z) * Mathf.Rad2Deg;
-
-                // Theoretical ideal release angle from projectile motion (no wind, no drag).
-                // Formula: θ = 45° + 0.5 * atan(h / d)  — gives a good starting point.
-                float idealAngleDeg = 45f + 0.5f * Mathf.Atan2(heightDiff, horizontalDist) * Mathf.Rad2Deg;
-
-                // Minimum release speed to reach the hoop assuming that ideal angle.
-                // v² = g*d / (sin(2θ) - 2*sin(θ)*h/d)  simplified for reference.
-                float g           = 9.81f;
-                float theta       = idealAngleDeg * Mathf.Deg2Rad;
-                float sinTwoTheta = Mathf.Sin(2f * theta);
-                float minSpeed    = (sinTwoTheta > 0.01f)
-                    ? Mathf.Sqrt(g * horizontalDist / sinTwoTheta)
-                    : 0f;
-
-                sb.AppendLine($"Hoop world position: ({hoopPos.x:F2}, {hoopPos.y:F2}, {hoopPos.z:F2}) m");
-                sb.AppendLine($"Player release position: ({releasePos.x:F2}, {releasePos.y:F2}, {releasePos.z:F2}) m");
-                sb.AppendLine($"Horizontal distance to hoop: {horizontalDist:F2} m");
-                sb.AppendLine($"Hoop height above release point: {heightDiff:F2} m");
-                sb.AppendLine($"Horizontal angle to hoop (0=world-forward): {horizontalAngle:F1}°");
-                sb.AppendLine($"Physics-ideal release angle (no drag): {idealAngleDeg:F1}°");
-                sb.AppendLine($"Physics-minimum release speed at that angle: {minSpeed:F2} m/s");
+                float   heightDiff     = hoopTransform.position.y - _pending.ReleasePosition.y;
+                sb.AppendLine($"Hoop: {horizontalDist:F2}m away, {heightDiff:F2}m above release. Ideal angle={idealAngle:F1}°, min speed={minSpeed:F2}m/s.");
             }
-            else
-            {
-                sb.AppendLine("Hoop position: unknown (hoopTransform not assigned).");
-            }
-            sb.AppendLine();
 
             // ── Wind ─────────────────────────────────────────────────────────────
-            sb.AppendLine("=== WIND ===");
-            if (windSystem != null)
-            {
-                sb.AppendLine($"Speed: {_pending.WindSpeedMs:F2} m/s");
-                sb.AppendLine($"Direction: {_pending.WindCardinal} ({_pending.WindAngleDeg:F1}°)");
-            }
-            else
-            {
-                sb.AppendLine("No wind system detected.");
-            }
-            sb.AppendLine();
+            if (windSystem != null && _pending.WindSpeedMs > 0.01f)
+                sb.AppendLine($"Wind: {_pending.WindSpeedMs:F2}m/s {_pending.WindCardinal} ({_pending.WindAngleDeg:F1}°).");
 
             // ── Current shot ─────────────────────────────────────────────────────
-            sb.AppendLine("=== CURRENT SHOT ===");
-            sb.AppendLine($"Outcome: {_pending.Outcome}");
-            sb.AppendLine($"Release speed: {_pending.ReleaseSpeedMs:F2} m/s");
-            sb.AppendLine($"Release angle: {_pending.ReleaseAngleDeg:F1}° above horizontal");
-            sb.AppendLine($"Release velocity: ({_pending.ReleaseVelocity.x:F2}, {_pending.ReleaseVelocity.y:F2}, {_pending.ReleaseVelocity.z:F2}) m/s");
-            sb.AppendLine($"Grab duration: {_pending.GrabDurationSec:F2} s");
-
-            if (_pending.FingerFlexion != null && _pending.FingerFlexion.Length >= 5)
-            {
-                sb.AppendLine($"Finger flexion at release (0=open, 1=closed): " +
-                              $"Thumb={_pending.FingerFlexion[0]:F2} " +
-                              $"Index={_pending.FingerFlexion[1]:F2} " +
-                              $"Middle={_pending.FingerFlexion[2]:F2} " +
-                              $"Ring={_pending.FingerFlexion[3]:F2} " +
-                              $"Pinky={_pending.FingerFlexion[4]:F2}");
-            }
+            sb.Append($"Shot outcome: {_pending.Outcome}. ");
+            sb.Append($"Release: {_pending.ReleaseSpeedMs:F2}m/s at {_pending.ReleaseAngleDeg:F1}°. ");
 
             if (_pending.EntrySpeedMs >= 0f)
-            {
-                sb.AppendLine($"Entry speed at hoop: {_pending.EntrySpeedMs:F2} m/s");
-                sb.AppendLine($"Entry angle from vertical: {_pending.EntryAngleDeg:F1}° (0°=straight down, ideal <45°)");
-            }
+                sb.Append($"Entry: {_pending.EntrySpeedMs:F2}m/s at {_pending.EntryAngleDeg:F1}° from vertical. ");
 
             if (_pending.RimImpactSpeedMs >= 0f)
-                sb.AppendLine($"Rim impact speed: {_pending.RimImpactSpeedMs:F2} m/s");
+                sb.Append($"Rim impact: {_pending.RimImpactSpeedMs:F2}m/s. ");
 
             sb.AppendLine();
 
-            // ── Shot history ─────────────────────────────────────────────────────
+            // ── Recent history (compact) ──────────────────────────────────────────
             if (_history.Count > 0)
             {
-                sb.AppendLine("=== RECENT SHOT HISTORY (oldest → newest) ===");
+                sb.Append("History: ");
                 foreach (ShotRecord r in _history)
-                {
-                    sb.Append($"Shot #{r.ShotNumber}: {r.Outcome} | ");
-                    sb.Append($"speed={r.ReleaseSpeedMs:F2} m/s | angle={r.ReleaseAngleDeg:F1}° | ");
-                    if (r.EntryAngleDeg >= 0f)
-                        sb.Append($"entry angle={r.EntryAngleDeg:F1}° | ");
-                    if (r.RimImpactSpeedMs >= 0f)
-                        sb.Append($"rim speed={r.RimImpactSpeedMs:F2} m/s | ");
-                    sb.AppendLine($"wind={r.WindSpeedMs:F1} m/s {r.WindCardinal}");
-                }
+                    sb.Append($"#{r.ShotNumber} {r.Outcome} {r.ReleaseSpeedMs:F1}m/s {r.ReleaseAngleDeg:F0}° | ");
                 sb.AppendLine();
             }
-
-            // ── Task ─────────────────────────────────────────────────────────────
-            sb.AppendLine("=== YOUR TASK ===");
-            sb.AppendLine("Based on all the data above, give the player exactly three numbered coaching instructions:");
-            sb.AppendLine("1. Position: move X m forward/backward and Y m left/right from current release spot.");
-            sb.AppendLine("2. Release angle: use X degrees above horizontal.");
-            sb.AppendLine("3. Release speed: throw at X m/s.");
 
             return sb.ToString();
         }
@@ -476,7 +427,10 @@ namespace Basketball
         private void OnModelResponse(string response)
         {
             if (_hideCoroutine != null)
+            {
                 StopCoroutine(_hideCoroutine);
+                _hideCoroutine = null;
+            }
 
             if (coachText != null)
             {
@@ -484,8 +438,6 @@ namespace Basketball
                     ? "[Coach offline — is Ollama running? Check the model name in OllamaVLMClient.]"
                     : response;
             }
-
-            _hideCoroutine = StartCoroutine(HideAfterDelay(feedbackDisplaySeconds));
         }
 
         private IEnumerator HideAfterDelay(float delay)
@@ -496,11 +448,35 @@ namespace Basketball
 
         // ─── Helpers ──────────────────────────────────────────────────────────────
 
-        /// <summary>Clears the coach panel text immediately.</summary>
+        /// <summary>Clears the coach panel text and hides visual aids immediately.</summary>
         public void ClearFeedback()
         {
             if (coachText != null)
                 coachText.text = string.Empty;
+
+            coachVisuals?.Hide();
+        }
+
+        /// <summary>
+        /// Computes the physics-ideal release angle and minimum speed to reach the hoop
+        /// from the given release position. Used to drive CoachVisuals without LLM parsing.
+        /// </summary>
+        private (float idealAngleDeg, float idealSpeedMs) ComputeIdealShot(Vector3 releasePos)
+        {
+            if (hoopTransform == null) return (45f, 0f);
+
+            Vector3 toHoop         = hoopTransform.position - releasePos;
+            float   horizontalDist = new Vector2(toHoop.x, toHoop.z).magnitude;
+            float   heightDiff     = hoopTransform.position.y - releasePos.y;
+
+            float idealAngle  = 45f + 0.5f * Mathf.Atan2(heightDiff, horizontalDist) * Mathf.Rad2Deg;
+            float theta       = idealAngle * Mathf.Deg2Rad;
+            float sinTwoTheta = Mathf.Sin(2f * theta);
+            float idealSpeed  = sinTwoTheta > 0.01f
+                ? Mathf.Sqrt(9.81f * horizontalDist / sinTwoTheta)
+                : 0f;
+
+            return (idealAngle, idealSpeed);
         }
     }
 }
