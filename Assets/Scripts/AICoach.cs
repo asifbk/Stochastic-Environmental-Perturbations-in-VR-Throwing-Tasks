@@ -71,6 +71,16 @@ namespace Basketball
         private Coroutine _outcomeCoroutine;
         private Coroutine _hideCoroutine;
 
+        /// <summary>True only after CommitShot() has fully resolved the outcome window for the current shot.</summary>
+        private bool _shotCommitted;
+
+        /// <summary>
+        /// Holds the prompt for the most recent shot that arrived while the client was busy.
+        /// Flushed and sent as soon as the client becomes free in OnModelResponse.
+        /// Only the latest shot is kept — intermediate shots are overwritten.
+        /// </summary>
+        private string _pendingPrompt;
+
         private readonly Queue<ShotRecord> _history = new Queue<ShotRecord>();
 
         private OllamaVLMClient _client;
@@ -158,6 +168,7 @@ namespace Basketball
         {
             // Space key: manual trigger for editor testing — only fires if at least one
             // real shot has been committed to history so the prompt has meaningful data.
+#if UNITY_EDITOR
 #if ENABLE_INPUT_SYSTEM
             bool spaceDown = Keyboard.current != null && Keyboard.current.spaceKey.wasPressedThisFrame;
 #else
@@ -176,6 +187,7 @@ namespace Basketball
                 Debug.Log("[AICoach] Manual query triggered via Space key.");
                 QueryModel();
             }
+#endif
         }
 
         // ─── Event Handlers ───────────────────────────────────────────────────────
@@ -217,6 +229,7 @@ namespace Basketball
 
             _awaitingOutcome  = true;
             _outcomeCoroutine = StartCoroutine(OutcomeWindow());
+            _shotCommitted    = false;
 
             ClearFeedback();
             Debug.Log($"[AICoach] Shot #{_shotCount} — speed {_pending.ReleaseSpeedMs:F2} m/s, angle {_pending.ReleaseAngleDeg:F1}°. Waiting {outcomeWaitSeconds}s for outcome.");
@@ -285,6 +298,7 @@ namespace Basketball
 
             _awaitingOutcome  = true;
             _outcomeCoroutine = StartCoroutine(OutcomeWindow());
+            _shotCommitted    = false;
 
             ClearFeedback();
         }
@@ -301,6 +315,7 @@ namespace Basketball
         private void CommitShot()
         {
             _awaitingOutcome = false;
+            _shotCommitted   = true;
 
             _history.Enqueue(_pending);
             if (_history.Count > MaxShotHistory)
@@ -326,36 +341,60 @@ namespace Basketball
         public void QueryModel()
         {
             // Swish: perfect shot — respond instantly without querying the LLM.
-            if (IsSwish(_pending))
+            // Guard with _shotCommitted to prevent stale or partial pending records
+            // from triggering this path before the outcome window has closed.
+            if (_shotCommitted && IsSwish(_pending))
             {
                 const string swishMessage = "What a perfect shot! You did it.";
                 if (coachText != null)
                     coachText.text = swishMessage;
                 coachTTS?.Speak(swishMessage);
+
+                // Auto-clear after the standard display window so the message
+                // does not persist into subsequent shots.
+                if (_hideCoroutine != null) StopCoroutine(_hideCoroutine);
+                _hideCoroutine = StartCoroutine(HideAfterDelay(feedbackDisplaySeconds));
+
+                _pendingPrompt = null; // swish needs no LLM follow-up
                 Debug.Log("[AICoach] Swish detected — skipping LLM query.");
                 return;
             }
 
-            if (_client.IsBusy)
-            {
-                Debug.LogWarning("[AICoach] Client is busy — skipping query for this shot.");
-                return;
-            }
-
+            // Always update the UI immediately so the previous shot's text never
+            // bleeds into the current shot (e.g. old swish message persisting).
             if (coachText != null)
                 coachText.text = "Coach is thinking...";
 
+            string prompt = BuildPrompt();
+
+            if (_client.IsBusy)
+            {
+                // Store the latest prompt so OnModelResponse can send it once the
+                // current request completes. This prevents shots from being silently
+                // dropped when Ollama is still processing the previous response.
+                _pendingPrompt = prompt;
+                Debug.LogWarning("[AICoach] Client is busy — queuing prompt for next available slot.");
+                return;
+            }
+
+            _pendingPrompt = null;
+            SendPrompt(prompt);
+        }
+
+        /// <summary>Dispatches a prompt to the client, using vision mode when a camera is assigned.</summary>
+        private void SendPrompt(string prompt)
+        {
             if (visionCamera != null)
-                StartCoroutine(QueryWithScreenshot());
+                StartCoroutine(QueryWithScreenshot(prompt));
             else
-                _client.SendTextRequest(BuildPrompt(), OnModelResponse);
+                _client.SendTextRequest(prompt, OnModelResponse);
         }
 
         /// <summary>
         /// Waits for end of frame so the rendered image is complete, captures a screenshot
         /// from visionCamera, then sends the prompt and image to the vision model.
         /// </summary>
-        private IEnumerator QueryWithScreenshot()
+        private IEnumerator QueryWithScreenshot(string prompt)
         {
             yield return new WaitForEndOfFrame();
 
@@ -365,7 +404,6 @@ namespace Basketball
                 screenshot = ScreenCapture.CaptureScreenshotAsTexture();
                 Debug.Log($"[AICoach] Screenshot captured ({screenshot.width}×{screenshot.height}) — sending vision request.");
 
-                string prompt = BuildPrompt();
                 Debug.Log($"[AICoach] Sending vision prompt to model ({prompt.Length} chars).");
 
                 _client.SendVisionRequest(prompt, screenshot, OnModelResponse);
@@ -471,6 +509,17 @@ namespace Basketball
             // Speak the response aloud when TTS is configured and there is valid text.
             if (coachTTS != null && hasResponse)
                 coachTTS.Speak(response);
+
+            // If a newer shot's prompt arrived while this request was in flight, send it now.
+            if (_pendingPrompt != null)
+            {
+                string prompt = _pendingPrompt;
+                _pendingPrompt = null;
+                Debug.Log("[AICoach] Flushing queued prompt for missed shot.");
+                if (coachText != null)
+                    coachText.text = "Coach is thinking...";
+                SendPrompt(prompt);
+            }
         }
 
         private IEnumerator HideAfterDelay(float delay)
