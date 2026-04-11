@@ -325,6 +325,17 @@ namespace Basketball
         /// <summary>Builds the prompt and sends it to the active vision model.</summary>
         public void QueryModel()
         {
+            // Swish: perfect shot — respond instantly without querying the LLM.
+            if (IsSwish(_pending))
+            {
+                const string swishMessage = "What a perfect shot! You did it.";
+                if (coachText != null)
+                    coachText.text = swishMessage;
+                coachTTS?.Speak(swishMessage);
+                Debug.Log("[AICoach] Swish detected — skipping LLM query.");
+                return;
+            }
+
             if (_client.IsBusy)
             {
                 Debug.LogWarning("[AICoach] Client is busy — skipping query for this shot.");
@@ -381,8 +392,20 @@ namespace Basketball
         {
             StringBuilder sb = new StringBuilder();
 
-            // ── System role (concise) ─────────────────────────────────────────────
-            sb.AppendLine("You are a VR basketball coach. Respond with ONLY 3 numbered instructions:");
+            // ── Outcome-specific opening instruction ──────────────────────────────
+            if (IsRimIn(_pending))
+            {
+                sb.AppendLine("You are a VR basketball coach. The player just scored but hit the rim first.");
+                sb.AppendLine("Start your response EXACTLY with: \"You are close enough to make a perfect shot, however for better accuracy follow these steps:\"");
+                sb.AppendLine("Then give ONLY 3 numbered instructions:");
+            }
+            else
+            {
+                sb.AppendLine("You are a VR basketball coach. The player missed the shot.");
+                sb.AppendLine("Start your response EXACTLY with: \"You need to follow the AI coach assistance:\"");
+                sb.AppendLine("Then give ONLY 3 numbered instructions:");
+            }
+
             sb.AppendLine("1. Position: move Xm forward/back and Ym left/right.");
             sb.AppendLine("2. Angle: release at X° above horizontal.");
             sb.AppendLine("3. Speed: throw at X m/s. No extra text.");
@@ -467,6 +490,20 @@ namespace Basketball
             coachVisuals?.Hide();
             coachTTS?.StopSpeaking();
         }
+
+        // ─── Shot Classification ──────────────────────────────────────────────────
+
+        /// <summary>
+        /// A swish is a clean score with no rim contact before entry.
+        /// </summary>
+        private static bool IsSwish(ShotRecord r) =>
+            r.Outcome == "Score" && r.RimImpactSpeedMs < 0f;
+
+        /// <summary>
+        /// A rim-in is a score where the ball struck the rim at least once before going through.
+        /// </summary>
+        private static bool IsRimIn(ShotRecord r) =>
+            r.Outcome == "Score" && r.RimImpactSpeedMs >= 0f;
 
         /// <summary>
         /// Computes the physics-ideal release angle and minimum speed to reach the hoop
