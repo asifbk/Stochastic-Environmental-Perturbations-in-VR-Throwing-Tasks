@@ -165,6 +165,23 @@ namespace Basketball
             bool isVision = imageBase64 != null;
             Debug.Log($"[OllamaClient] POST → {url}  model={modelName}  vision={isVision}  timeout={timeoutSeconds}s");
 
+            // Pre-flight: verify Ollama is reachable before sending the full payload.
+            string tagsUrl = ollamaBaseUrl.TrimEnd('/') + "/api/tags";
+            using (UnityWebRequest ping = UnityWebRequest.Get(tagsUrl))
+            {
+                ping.timeout = 5;
+                yield return ping.SendWebRequest();
+                if (ping.result != UnityWebRequest.Result.Success)
+                {
+                    Debug.LogError($"[OllamaClient] Ollama server not reachable at {ollamaBaseUrl} — is it running? ({ping.error})");
+                    onComplete?.Invoke(null);
+                    IsBusy = false;
+                    _requestStartTime        = -1f;
+                    _currentRequestCoroutine = null;
+                    yield break;
+                }
+            }
+
             using (UnityWebRequest www = UnityWebRequest.Post(url, jsonBody, "application/json"))
             {
                 www.timeout = Mathf.CeilToInt(timeoutSeconds);
