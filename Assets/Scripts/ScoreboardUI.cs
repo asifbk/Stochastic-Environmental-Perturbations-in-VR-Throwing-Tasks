@@ -79,7 +79,9 @@ namespace Basketball
 
             if (accuracyText != null)
             {
-                accuracyText.text = $"ACCURACY\n{accuracy:F1}%";
+                accuracyText.text = totalShots > 0
+                    ? $"ACCURACY\n{accuracy:F1}%"
+                    : "ACCURACY\n\u2014";
             }
 
             if (windSpeedText != null && windSystem != null)

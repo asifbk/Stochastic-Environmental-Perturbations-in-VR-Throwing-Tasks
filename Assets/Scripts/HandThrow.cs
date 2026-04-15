@@ -46,6 +46,12 @@ namespace Basketball
         [Tooltip("How long a ball must be stationary before it auto-resets to spawn. Set to 0 to disable.")]
         [SerializeField] [Min(0f)] private float autoResetAfterSeconds = 6f;
 
+        // Tracks which hand last held each ball, so the fallback path knows which velocity buffer to use.
+        private readonly Dictionary<Rigidbody, HandSide> _lastGrabHand = new Dictionary<Rigidbody, HandSide>();
+
+        // Tracks whether each ball was grabbed last frame — for polling-based release detection.
+        private readonly Dictionary<Rigidbody, bool> _wasGrabbedLastFrame = new Dictionary<Rigidbody, bool>();
+
         [Header("Throw Feel")]
         [Tooltip("Multiplier applied to the averaged release velocity. Tune for how 'punchy' throws feel.")]
         [SerializeField] [Range(0.5f, 3f)] private float velocityMultiplier = 1.2f;
@@ -153,6 +159,36 @@ namespace Basketball
                 if (rb.velocity.magnitude > VelocitySleepThreshold)
                     _lastMovedTime[rb] = Time.time;
 
+                // ── Polling-based grab/release fallback ──────────────────────────
+                // SG_Grabable.IsGrabbed() is reliable even when SG_PhysicsGrab events
+                // are silent (SenseCom conflict). We detect transitions here.
+                SG_Grabable grabable = rb.GetComponent<SG_Grabable>();
+                if (grabable != null)
+                {
+                    bool isGrabbedNow = grabable.IsGrabbed();
+                    _wasGrabbedLastFrame.TryGetValue(rb, out bool wasGrabbed);
+
+                    if (isGrabbedNow && !wasGrabbed)
+                    {
+                        // Grab started — record which hand and stamp grab time.
+                        HandSide side = DetectGrabHand(rb);
+                        _lastGrabHand[rb] = side;
+                        _grabStartTimes[rb] = Time.time;
+                    }
+                    else if (!isGrabbedNow && wasGrabbed)
+                    {
+                        // Release detected via polling — fire only if the event path missed it.
+                        SG_Interactable interactable = grabable;
+                        _lastGrabHand.TryGetValue(rb, out HandSide releaseSide);
+                        Vector3[]      buffer  = releaseSide == HandSide.Right ? _rightVelocityHistory : _leftVelocityHistory;
+                        SG_TrackedHand tracked = releaseSide == HandSide.Right ? rightTrackedHand : leftTrackedHand;
+                        HandleRelease(interactable, buffer, releaseSide, tracked);
+                    }
+
+                    _wasGrabbedLastFrame[rb] = isGrabbedNow;
+                }
+                // ── End polling fallback ─────────────────────────────────────────
+
                 if (ballSpawnPoint != null && rb.transform.position.y < outOfBoundsYThreshold)
                 {
                     ResetBall(rb);
@@ -167,6 +203,18 @@ namespace Basketball
                     ResetBall(rb);
                 }
             }
+        }
+
+        /// <summary>
+        /// Checks which SG_PhysicsGrab currently has an active grab — used by the polling
+        /// path to record the correct hand side at grab start.
+        /// </summary>
+        private HandSide DetectGrabHand(Rigidbody rb)
+        {
+            if (leftHandGrab != null && leftHandGrab.IsGrabbing)
+                return HandSide.Left;
+
+            return HandSide.Right;
         }
 
         // ─── Grab events ──────────────────────────────────────────────────────────
@@ -257,6 +305,9 @@ namespace Basketball
             HandleRelease(interactable, _leftVelocityHistory, HandSide.Left, leftTrackedHand);
         }
 
+        // Tracks the last frame a ball was released to prevent double-firing.
+        private readonly Dictionary<Rigidbody, int> _lastReleaseFrame = new Dictionary<Rigidbody, int>();
+
         /// <summary>
         /// Applies smoothed release velocity + backspin, records the shot, and fires OnBallReleased
         /// with position, time-on-task, and finger flexion data for the logger.
@@ -268,6 +319,11 @@ namespace Basketball
 
             Rigidbody ballRb = interactable.GetComponent<Rigidbody>();
             if (ballRb == null || !IsBall(ballRb)) return;
+
+            // Guard: prevent double-firing from both SG_PhysicsGrab and SG_Grabable paths in the same frame.
+            if (_lastReleaseFrame.TryGetValue(ballRb, out int lastFrame) && lastFrame == Time.frameCount)
+                return;
+            _lastReleaseFrame[ballRb] = Time.frameCount;
 
             Vector3 releaseVelocity = PeakVelocity(velocityHistory) * velocityMultiplier;
             Vector3 releasePosition = ballRb.position;

@@ -148,8 +148,13 @@ namespace Basketball
             UnsubscribeFromEvents();
         }
 
+        private bool _subscribed;
+
         private void SubscribeToEvents()
         {
+            if (_subscribed) return;
+            _subscribed = true;
+
             if (handThrow != null)
                 handThrow.OnBallReleased += OnBallReleased;
 
@@ -164,6 +169,9 @@ namespace Basketball
 
         private void UnsubscribeFromEvents()
         {
+            if (!_subscribed) return;
+            _subscribed = false;
+
             if (handThrow != null)
                 handThrow.OnBallReleased -= OnBallReleased;
 
@@ -212,8 +220,7 @@ namespace Basketball
                                     Vector3 releasePosition, float grabDuration, float[] fingerFlexion)
         {
             _throwInitiated = true;
-
-            // If a previous shot is still in its outcome window, flush it now.
+            Debug.Log($"[AICoach] OnBallReleased — hand={side}, speed={releaseVelocity.magnitude:F2} m/s. Coach pipeline starting.");
             if (_awaitingOutcome && _outcomeCoroutine != null)
             {
                 StopCoroutine(_outcomeCoroutine);

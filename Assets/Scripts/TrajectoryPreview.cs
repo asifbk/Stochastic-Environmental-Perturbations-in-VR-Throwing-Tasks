@@ -44,13 +44,19 @@ namespace Basketball
         // ─── Private State ────────────────────────────────────────────────────────
         private LineRenderer _lineRenderer;
 
-        // Per-frame position-delta velocity sampling — mirrors HandThrow's SampleVelocity.
+        // Must match HandThrow.VelocityHistorySize so PeakVelocity selects the same frame.
+        private const int VelocityHistorySize = 10;
+
+        // Ring buffers — exactly mirror HandThrow.SampleVelocity / PeakVelocity logic.
+        private readonly Vector3[] _rightVelocityHistory = new Vector3[VelocityHistorySize];
+        private readonly Vector3[] _leftVelocityHistory  = new Vector3[VelocityHistorySize];
+        private int _rightHistoryIndex;
+        private int _leftHistoryIndex;
+
         private Vector3 _rightLastPos;
         private Vector3 _leftLastPos;
         private bool    _rightInitialized;
         private bool    _leftInitialized;
-        private Vector3 _rightCurrentVelocity;
-        private Vector3 _leftCurrentVelocity;
 
         private readonly Vector3[] _arcPoints = new Vector3[SimulationSteps];
 
@@ -85,8 +91,10 @@ namespace Basketball
                 return;
             }
 
-            SampleTrackerVelocity(rightWristTracker, ref _rightLastPos, ref _rightInitialized, out _rightCurrentVelocity);
-            SampleTrackerVelocity(leftWristTracker,  ref _leftLastPos,  ref _leftInitialized,  out _leftCurrentVelocity);
+            SampleTrackerVelocity(rightWristTracker, _rightVelocityHistory, ref _rightLastPos,
+                                  ref _rightInitialized, ref _rightHistoryIndex);
+            SampleTrackerVelocity(leftWristTracker,  _leftVelocityHistory,  ref _leftLastPos,
+                                  ref _leftInitialized,  ref _leftHistoryIndex);
 
             Rigidbody heldBallRb = GetHeldBall(out Vector3 releaseVelocity);
 
@@ -102,33 +110,59 @@ namespace Basketball
         // ─── Helpers ──────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// Computes position-delta velocity for one wrist tracker, identical to HandThrow.SampleVelocity.
+        /// Computes position-delta velocity into a ring buffer, identical to HandThrow.SampleVelocity.
         /// </summary>
         private static void SampleTrackerVelocity(
             Transform tracker,
-            ref Vector3 lastPos, ref bool initialized,
-            out Vector3 velocity)
+            Vector3[] buffer,
+            ref Vector3 lastPos, ref bool initialized, ref int index)
         {
-            if (tracker == null) { velocity = Vector3.zero; return; }
+            if (tracker == null) return;
+
+            Vector3 velocity;
 
             if (!initialized)
             {
                 lastPos     = tracker.position;
                 initialized = true;
                 velocity    = Vector3.zero;
-                return;
+            }
+            else
+            {
+                velocity = Time.deltaTime > 0f
+                    ? (tracker.position - lastPos) / Time.deltaTime
+                    : Vector3.zero;
+
+                lastPos = tracker.position;
             }
 
-            velocity = Time.deltaTime > 0f
-                ? (tracker.position - lastPos) / Time.deltaTime
-                : Vector3.zero;
+            buffer[index] = velocity;
+            index = (index + 1) % buffer.Length;
+        }
 
-            lastPos = tracker.position;
+        /// <summary>
+        /// Returns the vector with the highest magnitude from the history buffer,
+        /// identical to HandThrow.PeakVelocity.
+        /// </summary>
+        private static Vector3 PeakVelocity(Vector3[] buffer)
+        {
+            Vector3 peak    = Vector3.zero;
+            float   peakSqr = 0f;
+            for (int i = 0; i < buffer.Length; i++)
+            {
+                float sqr = buffer[i].sqrMagnitude;
+                if (sqr > peakSqr)
+                {
+                    peakSqr = sqr;
+                    peak    = buffer[i];
+                }
+            }
+            return peak;
         }
 
         /// <summary>
         /// Returns the Rigidbody of the basketball currently held by either hand,
-        /// and outputs the corresponding wrist velocity as the predicted release velocity.
+        /// and outputs the peak-buffer velocity as the predicted release velocity.
         /// Returns null when nothing is held.
         /// </summary>
         private Rigidbody GetHeldBall(out Vector3 releaseVelocity)
@@ -138,13 +172,13 @@ namespace Basketball
             if (rightHandGrab != null && rightHandGrab.IsGrabbing)
             {
                 Rigidbody rb = FindBallInGrab(rightHandGrab);
-                if (rb != null) { releaseVelocity = _rightCurrentVelocity; return rb; }
+                if (rb != null) { releaseVelocity = PeakVelocity(_rightVelocityHistory); return rb; }
             }
 
             if (leftHandGrab != null && leftHandGrab.IsGrabbing)
             {
                 Rigidbody rb = FindBallInGrab(leftHandGrab);
-                if (rb != null) { releaseVelocity = _leftCurrentVelocity; return rb; }
+                if (rb != null) { releaseVelocity = PeakVelocity(_leftVelocityHistory); return rb; }
             }
 
             return null;
