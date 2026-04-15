@@ -32,6 +32,11 @@ namespace Basketball
         private const float FloorRaycastMaxDist = 20f;
         private const float ArcMaxSimSeconds    = 5f;
 
+        private void Awake()
+        {
+            Hide();
+        }
+
         /// <summary>
         /// Places the floor disc beneath the player's standing position and draws the ideal
         /// trajectory arc from the camera rig (player body) to the hoop.

@@ -75,6 +75,13 @@ namespace Basketball
         private bool _shotCommitted;
 
         /// <summary>
+        /// Set to true when a real throw is initiated (SenseGlove release or AutoShot T-key).
+        /// Prevents wind-drifted balls or stray physics events from triggering the coach pipeline
+        /// without an actual intentional throw.
+        /// </summary>
+        private bool _throwInitiated;
+
+        /// <summary>
         /// Holds the prompt for the most recent shot that arrived while the client was busy.
         /// Flushed and sent as soon as the client becomes free in OnModelResponse.
         /// Only the latest shot is kept — intermediate shots are overwritten.
@@ -120,6 +127,9 @@ namespace Basketball
             if (scoringTrigger == null) Debug.LogError("[AICoach] scoringTrigger is not assigned.");
             if (hoopTransform  == null) Debug.LogWarning("[AICoach] hoopTransform is not assigned — court geometry will be omitted from the prompt.");
             if (coachText      == null) Debug.LogError("[AICoach] coachText is not assigned.");
+
+            // Hide any stale visuals left over from a previous session.
+            ClearFeedback();
 
             // Subscribe here (after all Awakes have run) instead of OnEnable,
             // so we are guaranteed the events exist on the source components.
@@ -192,9 +202,17 @@ namespace Basketball
 
         // ─── Event Handlers ───────────────────────────────────────────────────────
 
+        /// <summary>
+        /// Call this from AutoShot (T-key debug launch) immediately before the ball is fired.
+        /// Marks the upcoming scoring/rim event as intentional so the coach pipeline activates.
+        /// </summary>
+        public void NotifyIntentionalThrow() => _throwInitiated = true;
+
         private void OnBallReleased(Vector3 releaseVelocity, HandThrow.HandSide side,
                                     Vector3 releasePosition, float grabDuration, float[] fingerFlexion)
         {
+            _throwInitiated = true;
+
             // If a previous shot is still in its outcome window, flush it now.
             if (_awaitingOutcome && _outcomeCoroutine != null)
             {
@@ -237,6 +255,9 @@ namespace Basketball
 
         private void OnScored(GameObject ball, float entrySpeed, Vector3 entryVelocity)
         {
+            // Ignore scoring events that were not preceded by a real throw.
+            if (!_throwInitiated) return;
+
             // If no throw was detected, synthesise a shot record from the ball's current state.
             if (!_awaitingOutcome)
             {
@@ -253,6 +274,9 @@ namespace Basketball
 
         private void OnRimHit(GameObject ball, float impactSpeed)
         {
+            // Ignore rim hits that were not preceded by a real throw.
+            if (!_throwInitiated) return;
+
             if (!_awaitingOutcome)
             {
                 Debug.Log("[AICoach] OnRimHit received without a prior release — synthesising shot record.");
@@ -316,6 +340,7 @@ namespace Basketball
         {
             _awaitingOutcome = false;
             _shotCommitted   = true;
+            _throwInitiated  = false;   // require a new throw before the next coaching cycle
 
             _history.Enqueue(_pending);
             if (_history.Count > MaxShotHistory)

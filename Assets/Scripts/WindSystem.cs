@@ -15,6 +15,14 @@ namespace Basketball
         [SerializeField] private float windVariation = 2f;
         [SerializeField] [Min(0.5f)] private float windChangeInterval = 4f;
 
+        [Header("Wind Audio")]
+        [Tooltip("AudioSource on this GameObject playing the looping wind clip.")]
+        [SerializeField] private AudioSource windAudioSource;
+        [Tooltip("Wind speed (m/s) at which the audio reaches full volume.")]
+        [SerializeField] private float maxAudioWindSpeed = 8f;
+        [Tooltip("Volume fade speed — higher values snap faster to the target volume.")]
+        [SerializeField] [Min(0.1f)] private float volumeFadeSpeed = 2f;
+
         [Header("Flag Direction Source")]
         [Tooltip("When assigned, the wind direction is read directly from the flag's Y rotation. "
                + "The WindVane child and random-axis logic are not used.")]
@@ -31,6 +39,9 @@ namespace Basketball
         private float _currentWindSpeed;
         private float _nextChangeTime;
 
+        /// <summary>Current wind direction angle in degrees. Cos(Y)→X, Sin(Y)→Z (project convention).</summary>
+        private float _currentWindAngleY;
+
         /// <summary>Current wind direction as a horizontal unit vector.</summary>
         public Vector3 WindDirection
         {
@@ -42,9 +53,18 @@ namespace Basketball
                 if (windVane != null)
                     return new Vector3(windVane.forward.x, 0f, windVane.forward.z).normalized;
 
-                return Vector3.forward;
+                return new Vector3(
+                    Mathf.Cos(_currentWindAngleY * Mathf.Deg2Rad),
+                    0f,
+                    Mathf.Sin(_currentWindAngleY * Mathf.Deg2Rad)).normalized;
             }
         }
+
+        /// <summary>
+        /// The target Y angle the flag should rotate toward this wind cycle.
+        /// Exposed so FlagRotationController can read it for smooth auto-rotation.
+        /// </summary>
+        public float TargetWindAngleY => _currentWindAngleY;
 
         /// <summary>Current wind speed in metres per second.</summary>
         public float WindSpeedMs => _currentWindSpeed;
@@ -52,15 +72,22 @@ namespace Basketball
         /// <summary>Current wind speed in kilometres per hour.</summary>
         public float WindSpeedKmh => _currentWindSpeed * 3.6f;
 
-        /// <summary>Horizontal wind angle in degrees (0 = world +X, 90 = world +Z).</summary>
+        /// <summary>
+        /// Horizontal wind angle in degrees using the project's axis convention:
+        /// +Z = East (90°), -Z = West (270°), +X = North (0°), -X = South (180°).
+        /// </summary>
         public float WindAngleDeg =>
-            Mathf.Atan2(WindDirection.z, WindDirection.x) * Mathf.Rad2Deg;
+            (Mathf.Atan2(WindDirection.z, WindDirection.x) * Mathf.Rad2Deg % 360f + 360f) % 360f;
 
-        /// <summary>Compass cardinal string for the current wind direction.</summary>
+        /// <summary>
+        /// Compass cardinal for the direction the wind is blowing TOWARD.
+        /// Convention: +X = North (0°), +Z = East (90°), -X = South (180°), -Z = West (270°).
+        /// </summary>
         public string WindCardinal()
         {
-            float a = (WindAngleDeg % 360f + 360f) % 360f;
-            string[] cardinals = { "E", "NE", "N", "NW", "W", "SW", "S", "SE" };
+            // WindAngleDeg already maps: 0°=N, 90°=E, 180°=S, 270°=W — index directly.
+            float a = WindAngleDeg;
+            string[] cardinals = { "N", "NE", "E", "SE", "S", "SW", "W", "NW" };
             return cardinals[Mathf.RoundToInt(a / 45f) % 8];
         }
 
@@ -70,6 +97,8 @@ namespace Basketball
         {
             if (Time.time >= _nextChangeTime)
                 RollNewWindSpeed();
+
+            UpdateAudio();
         }
 
         private void FixedUpdate()
@@ -89,11 +118,33 @@ namespace Basketball
             }
         }
 
-        /// <summary>Rolls a new wind speed. Direction is now dictated by the flag rotation.</summary>
+        /// <summary>Rolls a new wind speed and direction. Direction is restricted to East (90°) or West (270°).</summary>
         private void RollNewWindSpeed()
         {
-            _currentWindSpeed = Mathf.Max(0f, baseWindSpeed + Random.Range(-windVariation, windVariation));
-            _nextChangeTime = Time.time + windChangeInterval;
+            _currentWindSpeed  = Mathf.Max(0f, baseWindSpeed + Random.Range(-windVariation, windVariation));
+            _currentWindAngleY = Random.value < 0.5f ? 90f : 270f;   // East (+Z) or West (-Z)
+            _nextChangeTime    = Time.time + windChangeInterval;
+        }
+
+        /// <summary>
+        /// Smoothly fades the wind audio volume and adjusts pitch to match the current wind speed.
+        /// Volume is normalised between 0 and maxAudioWindSpeed.
+        /// Pitch scales slightly with speed (0.9 at calm, 1.1 at full) for a natural feel.
+        /// </summary>
+        private void UpdateAudio()
+        {
+            if (windAudioSource == null) return;
+
+            float targetVolume = Mathf.Clamp01(_currentWindSpeed / Mathf.Max(0.01f, maxAudioWindSpeed));
+            float targetPitch  = Mathf.Lerp(0.9f, 1.1f, targetVolume);
+
+            windAudioSource.volume = Mathf.MoveTowards(windAudioSource.volume, targetVolume, volumeFadeSpeed * Time.deltaTime);
+            windAudioSource.pitch  = targetPitch;
+
+            if (targetVolume > 0f && !windAudioSource.isPlaying)
+                windAudioSource.Play();
+            else if (targetVolume <= 0f && windAudioSource.isPlaying)
+                windAudioSource.Stop();
         }
     }
 }

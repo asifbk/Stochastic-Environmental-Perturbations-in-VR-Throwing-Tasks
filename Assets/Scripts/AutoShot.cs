@@ -25,6 +25,9 @@ namespace Basketball
         [Tooltip("The MeshCollider on Basketball_Stand (the rim). Disabled during flight so the ball passes cleanly through the hoop.")]
         [SerializeField] private Collider rimCollider;
 
+        [Tooltip("AICoach reference — notified just before launch so scoring events are treated as intentional.")]
+        [SerializeField] private AICoach aiCoach;
+
         [Header("Trajectory Tuning")]
         [Tooltip("Total flight time in seconds. Increasing this raises the arc height.")]
         [SerializeField] [Range(0.3f, 3f)] private float flightTime = 1.0f;
@@ -138,6 +141,9 @@ namespace Basketball
             _launched     = true;
             _previewTimer = -1f;
             _lineRenderer.positionCount = 0;
+
+            // Notify AICoach that this is an intentional throw before the ball is in flight.
+            aiCoach?.NotifyIntentionalThrow();
 
             // Disable rim so the ball passes cleanly through the hoop centre.
             if (rimCollider != null)

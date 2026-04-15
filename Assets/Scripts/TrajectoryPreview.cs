@@ -54,6 +54,10 @@ namespace Basketball
 
         private readonly Vector3[] _arcPoints = new Vector3[SimulationSteps];
 
+        // Defer arc drawing for a few frames to avoid false grab states from SenseGlove at startup.
+        private bool _warmUpDone;
+        private int  _warmUpFramesRemaining = 3;
+
         // ─── Unity Lifecycle ──────────────────────────────────────────────────────
 
         private void Awake()
@@ -73,6 +77,14 @@ namespace Basketball
 
         private void Update()
         {
+            // Skip the first few frames — SenseGlove may report a false grip state at startup.
+            if (!_warmUpDone)
+            {
+                if (--_warmUpFramesRemaining <= 0) _warmUpDone = true;
+                _lineRenderer.positionCount = 0;
+                return;
+            }
+
             SampleTrackerVelocity(rightWristTracker, ref _rightLastPos, ref _rightInitialized, out _rightCurrentVelocity);
             SampleTrackerVelocity(leftWristTracker,  ref _leftLastPos,  ref _leftInitialized,  out _leftCurrentVelocity);
 
