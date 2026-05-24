@@ -215,7 +215,7 @@ namespace SG
         /// <returns></returns>
         public static bool HasCharacteristic(UnityEngine.XR.InputDeviceCharacteristics allChars, UnityEngine.XR.InputDeviceCharacteristics toFind)
         {
-            return (allChars & toFind) == toFind; //Íf the LHS == toFind, that means that all bytes that are 1 in toFind are also 1 in allChars.
+            return (allChars & toFind) == toFind; //ï¿½f the LHS == toFind, that means that all bytes that are 1 in toFind are also 1 in allChars.
         }
 
 
@@ -523,7 +523,8 @@ namespace SG
                     }
                     //Debug.Log("Linked SG_XR_Devices Head Tracking to " + Report(xrHMD) + ", Concluded we're using " + trackingMethod.ToString() + " tracking");
 #if UNITY_EDITOR
-                    if (trackingMethod == TrackingPluginType.OpenXR)
+                    if (trackingMethod == TrackingPluginType.OpenXR
+                        && SG_Core.Settings.GlobalWristTrackingOffsets == TrackingHardware.AutoDetect)
                     {
                         Debug.LogWarning("It looks like you're using OpenXR to manage your devices. Unfortunately, that plugin makes it difficult for " +
                             "SenseGlove to check which device you're using. To prevent this from happening, override your Trackign Hardware in any SG_HapticGlove(s) you're using.");

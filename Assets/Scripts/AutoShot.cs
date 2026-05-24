@@ -11,8 +11,9 @@ namespace Basketball
     public class AutoShot : MonoBehaviour
     {
         // ─── Constants ────────────────────────────────────────────────────────────
-        private const int SimulationSteps    = 120;
+        private const int   SimulationSteps    = 120;
         private const float SimulationTimeStep = 0.04f;
+        private const int   GradientKeyCount   = 8;   // Unity Gradient max is 8 color/alpha keys.
 
         // ─── Inspector ────────────────────────────────────────────────────────────
         [Header("References")]
@@ -54,6 +55,7 @@ namespace Basketball
         private float        _previewTimer = -1f;   // < 0 means idle
         private bool         _launched;
         private Vector3[]    _arcPoints = new Vector3[SimulationSteps];
+        private float[]      _arcSpeeds = new float[SimulationSteps];
         private Vector3      _lockedBallPosition;   // ball world-pos when T is pressed
         private float        _rimReenableAt = -1f;  // Time.time value at which rim collider is re-enabled
 
@@ -72,6 +74,12 @@ namespace Basketball
 
             if (arcMaterial != null)
                 _lineRenderer.material = arcMaterial;
+            else
+            {
+                // Fallback: plain white Sprites/Default so vertex color gradient is visible.
+                _lineRenderer.material       = new Material(Shader.Find("Sprites/Default"));
+                _lineRenderer.material.color = Color.white;
+            }
         }
 
         private void Update()
@@ -142,8 +150,9 @@ namespace Basketball
             _previewTimer = -1f;
             _lineRenderer.positionCount = 0;
 
-            // Notify AICoach that this is an intentional throw before the ball is in flight.
-            aiCoach?.NotifyIntentionalThrow();
+            // Notify AICoach with full release kinematics so the outcome window opens
+            // immediately — this ensures a miss is caught even without a HandThrow event.
+            aiCoach?.NotifyAutoShotLaunched(ballRigidbody.position, _launchVelocity);
 
             // Disable rim so the ball passes cleanly through the hoop centre.
             if (rimCollider != null)
@@ -180,7 +189,8 @@ namespace Basketball
         // ─── Arc Visualisation ────────────────────────────────────────────────────
 
         /// <summary>
-        /// Simulates the projectile arc with Euler integration and renders it as a dotted line.
+        /// Simulates the projectile arc with Euler integration, renders it as a dotted line,
+        /// and colours each segment red with intensity proportional to local velocity magnitude.
         /// </summary>
         private void DrawArc(Vector3 startPos, Vector3 initialVelocity)
         {
@@ -189,9 +199,16 @@ namespace Basketball
             float   gravity = Physics.gravity.y;
             int     dotCount = 0;
 
+            float minSpeed = float.MaxValue;
+            float maxSpeed = float.MinValue;
+
             for (int i = 0; i < SimulationSteps; i++)
             {
                 _arcPoints[i] = pos;
+                _arcSpeeds[i] = vel.magnitude;
+
+                minSpeed = Mathf.Min(minSpeed, _arcSpeeds[i]);
+                maxSpeed = Mathf.Max(maxSpeed, _arcSpeeds[i]);
 
                 pos.x += vel.x * SimulationTimeStep;
                 pos.y += vel.y * SimulationTimeStep + 0.5f * gravity * SimulationTimeStep * SimulationTimeStep;
@@ -202,14 +219,36 @@ namespace Basketball
             }
 
             _lineRenderer.positionCount = dotCount * 2;
-            int idx = 0;
 
+            int idx = 0;
             for (int i = 0; i < SimulationSteps - 1; i++)
             {
                 if (i % dotSpacing != 0) continue;
                 _lineRenderer.SetPosition(idx++, _arcPoints[i]);
                 _lineRenderer.SetPosition(idx++, _arcPoints[i + 1]);
             }
+
+            // Sample 8 evenly-spaced speeds across the full arc to build the gradient.
+            // Unity Gradient is capped at GradientKeyCount (8) color and alpha keys.
+            float speedRange = Mathf.Max(maxSpeed - minSpeed, 0.001f);
+            var   colorKeys  = new GradientColorKey[GradientKeyCount];
+            var   alphaKeys  = new GradientAlphaKey[GradientKeyCount];
+
+            for (int k = 0; k < GradientKeyCount; k++)
+            {
+                float time      = (float)k / (GradientKeyCount - 1);
+                int   sampleIdx = Mathf.RoundToInt(time * (SimulationSteps - 1));
+                float t         = Mathf.Clamp01((_arcSpeeds[sampleIdx] - minSpeed) / speedRange);
+
+                // Low speed → salmon-red (green 0.55, alpha 0.35).
+                // High speed → vivid deep red (green 0, alpha 1).
+                colorKeys[k] = new GradientColorKey(new Color(1f, Mathf.Lerp(0.55f, 0f, t), 0f), time);
+                alphaKeys[k] = new GradientAlphaKey(Mathf.Lerp(0.35f, 1f, t), time);
+            }
+
+            var gradient = new Gradient();
+            gradient.SetKeys(colorKeys, alphaKeys);
+            _lineRenderer.colorGradient = gradient;
         }
     }
 }

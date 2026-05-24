@@ -44,8 +44,8 @@ namespace Basketball
         [SerializeField] private Rigidbody[] ballRigidbodies;
 
         [Header("Vision")]
-        [Tooltip("Assign a Camera to enable vision mode — a screenshot is sent with every query. " +
-                 "Leave empty to use text-only mode. Requires a vision-capable Ollama model (e.g. llava).")]
+        [Tooltip("Leave this empty. Vision mode (screenshot) adds significant SSH tunnel latency " +
+                 "and is disabled — OllamaVLMClient now runs text-only for fastest response.")]
         [SerializeField] private Camera visionCamera;
 
         [Header("Coach UI")]
@@ -216,6 +216,55 @@ namespace Basketball
         /// </summary>
         public void NotifyIntentionalThrow() => _throwInitiated = true;
 
+        /// <summary>
+        /// Called by AutoShot immediately after the ball is launched.
+        /// Opens the shot record and outcome window so a miss is correctly handled
+        /// even without a SenseGlove HandThrow release event.
+        /// </summary>
+        public void NotifyAutoShotLaunched(Vector3 releasePosition, Vector3 releaseVelocity)
+        {
+            _throwInitiated = true;
+
+            // If a previous outcome window is still open, commit it first.
+            if (_awaitingOutcome && _outcomeCoroutine != null)
+            {
+                StopCoroutine(_outcomeCoroutine);
+                CommitShot();
+            }
+
+            _shotCount++;
+
+            float horizontalSpeed = new Vector2(releaseVelocity.x, releaseVelocity.z).magnitude;
+            float releaseAngleDeg = horizontalSpeed > 0.001f
+                ? Mathf.Atan2(releaseVelocity.y, horizontalSpeed) * Mathf.Rad2Deg
+                : 0f;
+
+            _pending = new ShotRecord
+            {
+                ShotNumber       = _shotCount,
+                ReleasePosition  = releasePosition,
+                ReleaseVelocity  = releaseVelocity,
+                ReleaseSpeedMs   = releaseVelocity.magnitude,
+                ReleaseAngleDeg  = releaseAngleDeg,
+                GrabDurationSec  = -1f,
+                FingerFlexion    = null,
+                WindSpeedMs      = windSystem != null ? windSystem.WindSpeedMs   : 0f,
+                WindCardinal     = windSystem != null ? windSystem.WindCardinal() : "none",
+                WindAngleDeg     = windSystem != null ? windSystem.WindAngleDeg  : 0f,
+                EntrySpeedMs     = -1f,
+                EntryAngleDeg    = -1f,
+                RimImpactSpeedMs = -1f,
+                Outcome          = "Miss"
+            };
+
+            _awaitingOutcome  = true;
+            _outcomeCoroutine = StartCoroutine(OutcomeWindow());
+            _shotCommitted    = false;
+
+            ClearFeedback();
+            Debug.Log($"[AICoach] AutoShot #{_shotCount} — speed {_pending.ReleaseSpeedMs:F2} m/s, angle {_pending.ReleaseAngleDeg:F1}°. Waiting {outcomeWaitSeconds}s for outcome.");
+        }
+
         private void OnBallReleased(Vector3 releaseVelocity, HandThrow.HandSide side,
                                     Vector3 releasePosition, float grabDuration, float[] fingerFlexion)
         {
@@ -372,25 +421,9 @@ namespace Basketball
         /// <summary>Builds the prompt and sends it to the active vision model.</summary>
         public void QueryModel()
         {
-            // Swish: perfect shot — respond instantly without querying the LLM.
             // Guard with _shotCommitted to prevent stale or partial pending records
             // from triggering this path before the outcome window has closed.
-            if (_shotCommitted && IsSwish(_pending))
-            {
-                const string swishMessage = "What a perfect shot! You did it.";
-                if (coachText != null)
-                    coachText.text = swishMessage;
-                coachTTS?.Speak(swishMessage);
-
-                // Auto-clear after the standard display window so the message
-                // does not persist into subsequent shots.
-                if (_hideCoroutine != null) StopCoroutine(_hideCoroutine);
-                _hideCoroutine = StartCoroutine(HideAfterDelay(feedbackDisplaySeconds));
-
-                _pendingPrompt = null; // swish needs no LLM follow-up
-                Debug.Log("[AICoach] Swish detected — skipping LLM query.");
-                return;
-            }
+            if (!_shotCommitted) return;
 
             // Always update the UI immediately so the previous shot's text never
             // bleeds into the current shot (e.g. old swish message persisting).
@@ -413,110 +446,152 @@ namespace Basketball
             SendPrompt(prompt);
         }
 
-        /// <summary>Dispatches a prompt to the client, using vision mode when a camera is assigned.</summary>
+        /// <summary>
+        /// Dispatches the prompt to the client using streaming text mode.
+        /// Vision/screenshot is intentionally disabled — image encoding and base64
+        /// transmission over an SSH tunnel is the single biggest latency source.
+        /// All coaching context is embedded in the text prompt instead.
+        /// </summary>
         private void SendPrompt(string prompt)
         {
-            if (visionCamera != null)
-                StartCoroutine(QueryWithScreenshot(prompt));
-            else
-                _client.SendTextRequest(prompt, OnModelResponse);
+            _streamBuffer = string.Empty;
+            _client.SendStreamingTextRequest(prompt, OnModelToken, OnModelResponse);
         }
 
-        /// <summary>
-        /// Waits for end of frame so the rendered image is complete, captures a screenshot
-        /// from visionCamera, then sends the prompt and image to the vision model.
-        /// </summary>
-        private IEnumerator QueryWithScreenshot(string prompt)
+        /// <summary>Accumulates streamed tokens and updates the UI on each one for instant perceived feedback.</summary>
+        private string _streamBuffer = string.Empty;
+
+        private void OnModelToken(string token)
         {
-            yield return new WaitForEndOfFrame();
-
-            Texture2D screenshot = null;
-            try
-            {
-                screenshot = ScreenCapture.CaptureScreenshotAsTexture();
-                Debug.Log($"[AICoach] Screenshot captured ({screenshot.width}×{screenshot.height}) — sending vision request.");
-
-                Debug.Log($"[AICoach] Sending vision prompt to model ({prompt.Length} chars).");
-
-                _client.SendVisionRequest(prompt, screenshot, OnModelResponse);
-            }
-            catch (System.Exception ex)
-            {
-                Debug.LogError($"[AICoach] Error in QueryWithScreenshot: {ex.Message}\n{ex.StackTrace}");
-                if (coachText != null)
-                    coachText.text = "[Coach error — check logs]";
-            }
-            finally
-            {
-                // Always clean up the screenshot texture after sending (SendVisionRequest copies what it needs)
-                if (screenshot != null)
-                {
-                    Destroy(screenshot);
-                }
-            }
+            _streamBuffer += token;
+            if (coachText != null)
+                coachText.text = _streamBuffer;
         }
 
         // ─── Prompt Builder ───────────────────────────────────────────────────────
 
+        private const float AngleFaultThresholdDeg   = 3f;
+        private const float SpeedFaultThresholdMs    = 0.5f;
+        private const int   ConsecutiveMissThreshold = 3;
+        private const int   TrendMinShots            = 3;
+
         private string BuildPrompt()
         {
-            StringBuilder sb = new StringBuilder();
+            // Pre-compute corrections so the LLM receives pre-digested facts, not raw numbers.
+            // This removes any arithmetic the model would otherwise spend tokens on.
+            (float idealAngle, float idealSpeed) = ComputeIdealShot(_pending.ReleasePosition);
 
-            // ── Outcome-specific opening instruction ──────────────────────────────
-            if (IsRimIn(_pending))
-            {
-                sb.AppendLine("You are a VR basketball coach. The player just scored but hit the rim first.");
-                sb.AppendLine("Start your response EXACTLY with: \"You are close enough to make a perfect shot, however for better accuracy follow these steps:\"");
-                sb.AppendLine("Then give ONLY 3 numbered instructions:");
-            }
-            else
-            {
-                sb.AppendLine("You are a VR basketball coach. The player missed the shot.");
-                sb.AppendLine("Start your response EXACTLY with: \"You need to follow the AI coach assistance:\"");
-                sb.AppendLine("Then give ONLY 3 numbered instructions:");
-            }
+            float  angleDelta = idealAngle - _pending.ReleaseAngleDeg;
+            float  speedDelta = idealSpeed - _pending.ReleaseSpeedMs;
 
-            sb.AppendLine("1. Position: move Xm forward/back and Ym left/right.");
-            sb.AppendLine("2. Angle: release at X° above horizontal.");
-            sb.AppendLine("3. Speed: throw at X m/s. No extra text.");
-            sb.AppendLine();
+            string angleFault = Mathf.Abs(angleDelta) < AngleFaultThresholdDeg ? "angle OK"
+                              : angleDelta > 0f                                  ? $"too flat by {angleDelta:F1}°"
+                                                                                 : $"too steep by {Mathf.Abs(angleDelta):F1}°";
 
-            // ── Court context ─────────────────────────────────────────────────────
+            string speedFault = Mathf.Abs(speedDelta) < SpeedFaultThresholdMs ? "speed OK"
+                              : speedDelta > 0f                                 ? $"too slow by {speedDelta:F2} m/s"
+                                                                                : $"too fast by {Mathf.Abs(speedDelta):F2} m/s";
+
+            int  consecutiveMisses = CountConsecutiveMisses();
+            bool persistentlyFlat  = IsConsistentAngleFault(positive: true);
+            bool persistentlySteep = IsConsistentAngleFault(positive: false);
+            bool persistentlySlow  = IsConsistentSpeedFault(positive: true);
+            bool persistentlyFast  = IsConsistentSpeedFault(positive: false);
+
+            // Keep the prompt as short as possible — every extra token increases TTFT on the SSH tunnel.
+            var sb = new StringBuilder();
+
+            sb.Append($"Shot #{_pending.ShotNumber}: {_pending.Outcome}. ");
+
             if (hoopTransform != null)
             {
-                (float idealAngle, float minSpeed) = ComputeIdealShot(_pending.ReleasePosition);
-                Vector3 toHoop         = hoopTransform.position - _pending.ReleasePosition;
-                float   horizontalDist = new Vector2(toHoop.x, toHoop.z).magnitude;
-                float   heightDiff     = hoopTransform.position.y - _pending.ReleasePosition.y;
-                sb.AppendLine($"Hoop: {horizontalDist:F2}m away, {heightDiff:F2}m above release. Ideal angle={idealAngle:F1}°, min speed={minSpeed:F2}m/s.");
+                Vector3 toHoop = hoopTransform.position - _pending.ReleasePosition;
+                float   hDist  = new Vector2(toHoop.x, toHoop.z).magnitude;
+                float   vDiff  = hoopTransform.position.y - _pending.ReleasePosition.y;
+                sb.Append($"Hoop: {hDist:F1}m away, {vDiff:F1}m up. Ideal: {idealAngle:F1}° at {idealSpeed:F2}m/s. ");
             }
 
-            // ── Wind ─────────────────────────────────────────────────────────────
-            if (windSystem != null && _pending.WindSpeedMs > 0.01f)
-                sb.AppendLine($"Wind: {_pending.WindSpeedMs:F2}m/s {_pending.WindCardinal} ({_pending.WindAngleDeg:F1}°).");
-
-            // ── Current shot ─────────────────────────────────────────────────────
-            sb.Append($"Shot outcome: {_pending.Outcome}. ");
-            sb.Append($"Release: {_pending.ReleaseSpeedMs:F2}m/s at {_pending.ReleaseAngleDeg:F1}°. ");
-
-            if (_pending.EntrySpeedMs >= 0f)
-                sb.Append($"Entry: {_pending.EntrySpeedMs:F2}m/s at {_pending.EntryAngleDeg:F1}° from vertical. ");
+            sb.Append($"Released: {_pending.ReleaseAngleDeg:F1}° at {_pending.ReleaseSpeedMs:F2}m/s. ");
+            sb.Append($"{angleFault}, {speedFault}. ");
 
             if (_pending.RimImpactSpeedMs >= 0f)
-                sb.Append($"Rim impact: {_pending.RimImpactSpeedMs:F2}m/s. ");
+                sb.Append($"Rim hit at {_pending.RimImpactSpeedMs:F2}m/s. ");
 
-            sb.AppendLine();
+            if (_pending.EntrySpeedMs >= 0f)
+                sb.Append($"Entry: {_pending.EntrySpeedMs:F2}m/s at {_pending.EntryAngleDeg:F1}°. ");
 
-            // ── Recent history (compact) ──────────────────────────────────────────
-            if (_history.Count > 0)
-            {
-                sb.Append("History: ");
-                foreach (ShotRecord r in _history)
-                    sb.Append($"#{r.ShotNumber} {r.Outcome} {r.ReleaseSpeedMs:F1}m/s {r.ReleaseAngleDeg:F0}° | ");
-                sb.AppendLine();
-            }
+            if (windSystem != null && _pending.WindSpeedMs > 0.01f)
+                sb.Append($"Wind: {_pending.WindSpeedMs:F2}m/s {_pending.WindCardinal}. ");
+
+            // Trend context — only append when meaningful to keep the prompt tight.
+            if (consecutiveMisses >= ConsecutiveMissThreshold)
+                sb.Append($"{consecutiveMisses} misses in a row. ");
+            if (persistentlyFlat)  sb.Append("Trend: consistently too flat. ");
+            if (persistentlySteep) sb.Append("Trend: consistently too steep. ");
+            if (persistentlySlow)  sb.Append("Trend: consistently too slow. ");
+            if (persistentlyFast)  sb.Append("Trend: consistently too hard. ");
+
+            // Outcome-specific coaching instruction — the most important part.
+            if (IsSwish(_pending))
+                sb.Append("Perfect swish! Tell the player what made this ideal and how to repeat it.");
+            else if (IsRimIn(_pending))
+                sb.Append("Scored but hit the rim. Give one specific tip to clean it up.");
+            else
+                sb.Append("Missed. Tell the player exactly how to adjust angle and speed to score.");
 
             return sb.ToString();
+        }
+
+        // ─── Trend Helpers ────────────────────────────────────────────────────────
+
+        /// <summary>Counts how many of the most recent committed shots were misses (not Score).</summary>
+        private int CountConsecutiveMisses()
+        {
+            int count = _pending.Outcome != "Score" ? 1 : 0;
+            foreach (ShotRecord r in _history)
+            {
+                if (r.Outcome != "Score") count++;
+                else break;
+            }
+            return count;
+        }
+
+        /// <summary>
+        /// Returns true when at least <see cref="TrendMinShots"/> history entries share the same
+        /// angle-fault direction. <paramref name="positive"/> true = too flat; false = too steep.
+        /// </summary>
+        private bool IsConsistentAngleFault(bool positive)
+        {
+            if (_history.Count < TrendMinShots) return false;
+
+            (float idealAngle, _) = ComputeIdealShot(_pending.ReleasePosition);
+            int faultCount = 0;
+            foreach (ShotRecord r in _history)
+            {
+                float delta = idealAngle - r.ReleaseAngleDeg;
+                if (positive ? delta > AngleFaultThresholdDeg : delta < -AngleFaultThresholdDeg)
+                    faultCount++;
+            }
+            return faultCount >= TrendMinShots;
+        }
+
+        /// <summary>
+        /// Returns true when at least <see cref="TrendMinShots"/> history entries share the same
+        /// speed-fault direction. <paramref name="positive"/> true = too slow; false = too fast.
+        /// </summary>
+        private bool IsConsistentSpeedFault(bool positive)
+        {
+            if (_history.Count < TrendMinShots) return false;
+
+            (_, float idealSpeed) = ComputeIdealShot(_pending.ReleasePosition);
+            int faultCount = 0;
+            foreach (ShotRecord r in _history)
+            {
+                float delta = idealSpeed - r.ReleaseSpeedMs;
+                if (positive ? delta > SpeedFaultThresholdMs : delta < -SpeedFaultThresholdMs)
+                    faultCount++;
+            }
+            return faultCount >= TrendMinShots;
         }
 
         // ─── Model Response ───────────────────────────────────────────────────────

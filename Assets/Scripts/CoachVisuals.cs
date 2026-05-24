@@ -5,15 +5,29 @@ namespace Basketball
 {
     /// <summary>
     /// Renders two visual coaching aids after each committed shot:
-    ///   - A floor disc marking where the player is standing.
+    ///   - A dotted circle floor marker beneath the player's feet (drawn with a LineRenderer).
     ///   - A trajectory arc showing the ideal throw path from the camera rig
     ///     (player origin) to the hoop centre via a physics-simulated parabola.
     /// Call ShowGuidance() after a shot is committed and Hide() when a new throw begins.
     /// </summary>
     public class CoachVisuals : MonoBehaviour
     {
+        [Header("Ghost Ball")]
+        [Tooltip("GhostBallAnimator that flies along the ideal arc after each shot.")]
+        [SerializeField] private GhostBallAnimator ghostBallAnimator;
+
         [Header("Floor Marker")]
-        [SerializeField] private Transform floorMarker;
+        [Tooltip("LineRenderer used to draw the dotted circle on the floor beneath the player.")]
+        [SerializeField] private LineRenderer floorMarkerRenderer;
+
+        [Tooltip("Radius of the dotted circle floor marker in metres.")]
+        [SerializeField] private float floorMarkerRadius = 0.3f;
+
+        [Tooltip("Number of dots drawn around the circle. Higher = more dots, denser pattern.")]
+        [SerializeField] private int floorMarkerDotCount = 24;
+
+        [Tooltip("Fraction of each dot segment that is visible (0–1). 0.4 = 40 % on, 60 % off.")]
+        [SerializeField][Range(0.01f, 0.99f)] private float dotDuty = 0.4f;
 
         [Header("Trajectory Arc")]
         [SerializeField] private LineRenderer trajectoryArc;
@@ -31,6 +45,8 @@ namespace Basketball
 
         private const float FloorRaycastMaxDist = 20f;
         private const float ArcMaxSimSeconds    = 5f;
+        private const float GravityMs2          = 9.81f;
+        private const int   GradientKeyCount    = 8;   // Unity Gradient max is 8 color/alpha keys.
 
         private void Awake()
         {
@@ -38,8 +54,8 @@ namespace Basketball
         }
 
         /// <summary>
-        /// Places the floor disc beneath the player's standing position and draws the ideal
-        /// trajectory arc from the camera rig (player body) to the hoop.
+        /// Places the dotted circle floor marker beneath the player's standing position and draws
+        /// the ideal trajectory arc from the camera rig (player body) to the hoop.
         /// </summary>
         /// <param name="playerPos">Player head/body world position — floor disc projected down from here.</param>
         /// <param name="releasePos">Actual ball release position — used as arc origin fallback when
@@ -60,39 +76,115 @@ namespace Basketball
                               cameraRigTransform.position.z)
                 : releasePos;
 
-            DrawArc(arcOrigin, hoopPos, idealAngleDeg, idealSpeedMs);
+            // Re-derive speed using the correct elevated-target formula so that the
+            // arc actually reaches the hoop even when it is above the release point.
+            float correctedSpeed = ComputeSpeedForTarget(arcOrigin, hoopPos, idealAngleDeg);
+            float useSpeed       = correctedSpeed > 0f ? correctedSpeed : idealSpeedMs;
+
+            DrawArc(arcOrigin, hoopPos, idealAngleDeg, useSpeed);
+            ghostBallAnimator?.Play(arcOrigin, hoopPos, idealAngleDeg, useSpeed);
         }
 
         /// <summary>Hides both visual aids.</summary>
         public void Hide()
         {
-            if (floorMarker != null)   floorMarker.gameObject.SetActive(false);
-            if (trajectoryArc != null) trajectoryArc.gameObject.SetActive(false);
+            if (floorMarkerRenderer != null) floorMarkerRenderer.gameObject.SetActive(false);
+            if (trajectoryArc != null)       trajectoryArc.gameObject.SetActive(false);
+            ghostBallAnimator?.Stop();
         }
 
-        // ─── Floor marker ─────────────────────────────────────────────────────────
+        // ─── Floor marker (dotted circle) ─────────────────────────────────────────
 
         private void PlaceFloorMarker(Vector3 playerPos)
         {
-            if (floorMarker == null) return;
+            if (floorMarkerRenderer == null) return;
 
             Vector3 origin   = new Vector3(playerPos.x, playerPos.y + 0.2f, playerPos.z);
             Vector3 floorPos = Physics.Raycast(origin, Vector3.down, out RaycastHit hit, FloorRaycastMaxDist)
                 ? hit.point + Vector3.up * 0.01f
                 : new Vector3(playerPos.x, 0.01f, playerPos.z);
 
-            floorMarker.position = floorPos;
-            floorMarker.gameObject.SetActive(true);
+            BuildDottedCircle(floorPos);
+            floorMarkerRenderer.gameObject.SetActive(true);
+        }
+
+        /// <summary>
+        /// Populates the floor LineRenderer with a dotted circle pattern.
+        /// Each "dot" is drawn as a short arc segment; gaps are created by jumping
+        /// the pen to the start of the next dot without drawing.
+        /// </summary>
+        private void BuildDottedCircle(Vector3 centre)
+        {
+            // Each dot occupies (2π / dotCount) radians; dotDuty controls the on fraction.
+            float segmentAngle = 2f * Mathf.PI / floorMarkerDotCount;
+            float onAngle      = segmentAngle * dotDuty;
+            int   stepsPerDot  = Mathf.Max(2, Mathf.RoundToInt(onAngle / (Mathf.PI / 32f)));
+
+            // 2 points per gap jump + stepsPerDot points per dot.
+            int totalPoints = floorMarkerDotCount * (stepsPerDot + 1);
+            var points      = new Vector3[totalPoints];
+            int idx         = 0;
+
+            for (int d = 0; d < floorMarkerDotCount; d++)
+            {
+                float startAngle = d * segmentAngle;
+
+                // Draw the visible dot segment.
+                for (int s = 0; s < stepsPerDot; s++)
+                {
+                    float a = startAngle + onAngle * s / (stepsPerDot - 1);
+                    points[idx++] = centre + new Vector3(
+                        Mathf.Cos(a) * floorMarkerRadius,
+                        0f,
+                        Mathf.Sin(a) * floorMarkerRadius);
+                }
+
+                // Jump (invisible) to the start of the next dot by duplicating the
+                // last point — the gap is covered because the next iteration starts
+                // at a different angle.
+                float nextAngle = (d + 1) * segmentAngle;
+                points[idx++] = centre + new Vector3(
+                    Mathf.Cos(nextAngle) * floorMarkerRadius,
+                    0f,
+                    Mathf.Sin(nextAngle) * floorMarkerRadius);
+            }
+
+            floorMarkerRenderer.positionCount = totalPoints;
+            floorMarkerRenderer.SetPositions(points);
+            floorMarkerRenderer.loop = false;
         }
 
         // ─── Trajectory arc ───────────────────────────────────────────────────────
+
+        /// <summary>
+        /// Derives the launch speed required to reach <paramref name="target"/> from
+        /// <paramref name="origin"/> at <paramref name="angleDeg"/>, accounting for the
+        /// height difference between origin and target (elevated-target ballistic formula).
+        /// Returns 0 if the shot is geometrically impossible at the given angle.
+        /// </summary>
+        private static float ComputeSpeedForTarget(Vector3 origin, Vector3 target, float angleDeg)
+        {
+            Vector3 delta         = target - origin;
+            float   horizDist     = new Vector2(delta.x, delta.z).magnitude;
+            float   heightDiff    = delta.y;                 // positive when hoop is above origin
+            float   theta         = angleDeg * Mathf.Deg2Rad;
+            float   cosTheta      = Mathf.Cos(theta);
+            float   tanTheta      = Mathf.Tan(theta);
+
+            // Derived from: y = x·tan(θ) - (g·x²) / (2·v²·cos²θ)
+            // Solving for v: v² = g·x² / (2·cos²θ·(x·tan(θ) - y))
+            float denom = 2f * cosTheta * cosTheta * (horizDist * tanTheta - heightDiff);
+            if (denom <= 0f) return 0f;
+
+            return Mathf.Sqrt(GravityMs2 * horizDist * horizDist / denom);
+        }
 
         private void DrawArc(Vector3 arcOrigin, Vector3 hoopPos,
                              float idealAngleDeg, float idealSpeedMs)
         {
             if (trajectoryArc == null || idealSpeedMs <= 0f) return;
 
-            // Horizontal direction from the camera rig position toward the hoop.
+            // Horizontal direction from the arc origin toward the hoop.
             Vector3 toHoop         = hoopPos - arcOrigin;
             Vector3 horizontal     = new Vector3(toHoop.x, 0f, toHoop.z).normalized;
             float   totalHorizDist = new Vector2(toHoop.x, toHoop.z).magnitude;
@@ -101,13 +193,15 @@ namespace Basketball
             Vector3 velocity = (horizontal * Mathf.Cos(angleRad)
                                + Vector3.up  * Mathf.Sin(angleRad)) * idealSpeedMs;
 
-            List<Vector3> points  = new List<Vector3>();
-            Vector3       pos     = arcOrigin;
-            float         elapsed = 0f;
+            var     points  = new List<Vector3>();
+            var     speeds  = new List<float>();
+            Vector3 pos     = arcOrigin;
+            float   elapsed = 0f;
 
             while (elapsed < ArcMaxSimSeconds)
             {
                 points.Add(pos);
+                speeds.Add(velocity.magnitude);
 
                 velocity += Physics.gravity * arcSimStep;
                 pos      += velocity * arcSimStep;
@@ -120,6 +214,7 @@ namespace Basketball
                 if (horizCovered >= totalHorizDist * 0.9f && velocity.y < 0f)
                 {
                     points.Add(hoopPos);
+                    speeds.Add(velocity.magnitude);
                     break;
                 }
 
@@ -129,6 +224,32 @@ namespace Basketball
 
             trajectoryArc.positionCount = points.Count;
             trajectoryArc.SetPositions(points.ToArray());
+
+            // Sample 8 evenly-spaced speeds across the arc to stay within Unity's
+            // Gradient limit of GradientKeyCount (8) color and alpha keys.
+            float minSpeed = float.MaxValue;
+            float maxSpeed = float.MinValue;
+            foreach (float s in speeds) { minSpeed = Mathf.Min(minSpeed, s); maxSpeed = Mathf.Max(maxSpeed, s); }
+            float speedRange = Mathf.Max(maxSpeed - minSpeed, 0.001f);
+
+            int n        = speeds.Count;
+            var colorKeys = new GradientColorKey[GradientKeyCount];
+            var alphaKeys = new GradientAlphaKey[GradientKeyCount];
+
+            for (int k = 0; k < GradientKeyCount; k++)
+            {
+                float time      = (float)k / (GradientKeyCount - 1);
+                int   sampleIdx = Mathf.RoundToInt(time * (n - 1));
+                float t         = Mathf.Clamp01((speeds[sampleIdx] - minSpeed) / speedRange);
+
+                colorKeys[k] = new GradientColorKey(new Color(1f, Mathf.Lerp(0.55f, 0f, t), 0f), time);
+                alphaKeys[k] = new GradientAlphaKey(Mathf.Lerp(0.35f, 1f, t), time);
+            }
+
+            var gradient = new Gradient();
+            gradient.SetKeys(colorKeys, alphaKeys);
+            trajectoryArc.colorGradient = gradient;
+
             trajectoryArc.gameObject.SetActive(true);
         }
     }
