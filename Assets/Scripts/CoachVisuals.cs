@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -43,6 +44,16 @@ namespace Basketball
         [Tooltip("Physics simulation time-step for the arc. Smaller = smoother but more points.")]
         [SerializeField] private float arcSimStep = 0.05f;
 
+        [Header("Actual Trajectory")]
+        [Tooltip("LineRenderer used to trace the player's actual throw path. " +
+                 "Color varies red with ball speed — darker at low speed, vivid at peak speed.")]
+        [SerializeField] private LineRenderer actualTrajectoryArc;
+
+        private Coroutine _trackingCoroutine;
+
+        private const int   MaxTrajectoryPoints = 500;
+        private const float TrajectoryRecordHz  = 50f;
+
         private const float FloorRaycastMaxDist = 20f;
         private const float ArcMaxSimSeconds    = 5f;
         private const float GravityMs2          = 9.81f;
@@ -85,12 +96,112 @@ namespace Basketball
             ghostBallAnimator?.Play(arcOrigin, hoopPos, idealAngleDeg, useSpeed);
         }
 
-        /// <summary>Hides both visual aids.</summary>
+        /// <summary>Hides both visual aids and stops any active ball tracking.</summary>
         public void Hide()
         {
-            if (floorMarkerRenderer != null) floorMarkerRenderer.gameObject.SetActive(false);
-            if (trajectoryArc != null)       trajectoryArc.gameObject.SetActive(false);
+            if (floorMarkerRenderer  != null) floorMarkerRenderer.gameObject.SetActive(false);
+            if (trajectoryArc        != null) trajectoryArc.gameObject.SetActive(false);
+            if (actualTrajectoryArc  != null) actualTrajectoryArc.gameObject.SetActive(false);
+            StopTracking();
             ghostBallAnimator?.Stop();
+        }
+
+        // ─── Actual trajectory recording ──────────────────────────────────────────
+
+        /// <summary>
+        /// Starts recording the ball's world-space path into <see cref="actualTrajectoryArc"/>.
+        /// Recording stops automatically once the ball descends past <paramref name="hoopPosition"/>.y,
+        /// limiting the red arc to the throw arc up to the net.
+        /// </summary>
+        /// <param name="ball">The Rigidbody of the released basketball to track.</param>
+        /// <param name="hoopPosition">World-space centre of the hoop. Recording stops when the ball
+        /// descends below this height while moving downward.</param>
+        public void StartTracking(Rigidbody ball, Vector3 hoopPosition)
+        {
+            StopTracking();
+
+            if (actualTrajectoryArc != null)
+            {
+                actualTrajectoryArc.positionCount = 0;
+                actualTrajectoryArc.gameObject.SetActive(true);
+            }
+
+            if (ball != null)
+                _trackingCoroutine = StartCoroutine(TrackBall(ball, hoopPosition));
+        }
+
+        /// <summary>Stops recording ball positions. The drawn line remains visible.</summary>
+        public void StopTracking()
+        {
+            if (_trackingCoroutine == null) return;
+            StopCoroutine(_trackingCoroutine);
+            _trackingCoroutine = null;
+        }
+
+        private IEnumerator TrackBall(Rigidbody ball, Vector3 hoopPosition)
+        {
+            var   positions      = new List<Vector3>();
+            var   speeds         = new List<float>();
+            float recordInterval = 1f / TrajectoryRecordHz;
+            float nextSample     = Time.time;
+
+            while (ball != null && positions.Count < MaxTrajectoryPoints)
+            {
+                if (Time.time >= nextSample)
+                {
+                    positions.Add(ball.position);
+                    speeds.Add(ball.velocity.magnitude);
+                    nextSample = Time.time + recordInterval;
+
+                    UpdateActualTrajectory(positions, speeds);
+
+                    // Stop once the ball descends past the hoop height — the arc up to the net is complete.
+                    if (ball.position.y <= hoopPosition.y && ball.velocity.y < 0f)
+                        break;
+                }
+
+                yield return null;
+            }
+
+            _trackingCoroutine = null;
+        }
+
+        private void UpdateActualTrajectory(List<Vector3> positions, List<float> speeds)
+        {
+            if (actualTrajectoryArc == null || positions.Count == 0) return;
+
+            actualTrajectoryArc.positionCount = positions.Count;
+            actualTrajectoryArc.SetPositions(positions.ToArray());
+
+            if (positions.Count < 2) return;
+
+            float minSpeed = float.MaxValue, maxSpeed = float.MinValue;
+            foreach (float s in speeds)
+            {
+                if (s < minSpeed) minSpeed = s;
+                if (s > maxSpeed) maxSpeed = s;
+            }
+            float speedRange = Mathf.Max(maxSpeed - minSpeed, 0.001f);
+
+            int n        = speeds.Count;
+            int keyCount = Mathf.Min(GradientKeyCount, n);
+            var colorKeys = new GradientColorKey[keyCount];
+            var alphaKeys = new GradientAlphaKey[keyCount];
+
+            for (int k = 0; k < keyCount; k++)
+            {
+                float time      = keyCount > 1 ? (float)k / (keyCount - 1) : 0f;
+                int   sampleIdx = Mathf.RoundToInt(time * (n - 1));
+                float t         = Mathf.Clamp01((speeds[sampleIdx] - minSpeed) / speedRange);
+
+                // Low speed → dim red; high speed → vivid bright red.
+                colorKeys[k] = new GradientColorKey(new Color(1f, Mathf.Lerp(0.45f, 0f, t), 0f), time);
+                alphaKeys[k] = new GradientAlphaKey(Mathf.Lerp(0.4f, 1f, t), time);
+            }
+
+            var gradient = new Gradient();
+            gradient.SetKeys(colorKeys, alphaKeys);
+            actualTrajectoryArc.colorGradient = gradient;
         }
 
         // ─── Floor marker (dotted circle) ─────────────────────────────────────────
@@ -242,8 +353,8 @@ namespace Basketball
                 int   sampleIdx = Mathf.RoundToInt(time * (n - 1));
                 float t         = Mathf.Clamp01((speeds[sampleIdx] - minSpeed) / speedRange);
 
-                colorKeys[k] = new GradientColorKey(new Color(1f, Mathf.Lerp(0.55f, 0f, t), 0f), time);
-                alphaKeys[k] = new GradientAlphaKey(Mathf.Lerp(0.35f, 1f, t), time);
+                colorKeys[k] = new GradientColorKey(new Color(0f, Mathf.Lerp(0.45f, 1f, t), 0f), time);
+                alphaKeys[k] = new GradientAlphaKey(Mathf.Lerp(0.5f, 1f, t), time);
             }
 
             var gradient = new Gradient();

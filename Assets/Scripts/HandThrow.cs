@@ -46,6 +46,14 @@ namespace Basketball
         [Tooltip("How long a ball must be stationary before it auto-resets to spawn. Set to 0 to disable.")]
         [SerializeField] [Min(0f)] private float autoResetAfterSeconds = 6f;
 
+        [Header("Play Area Boundary")]
+        [Tooltip("Transform whose local XZ plane defines the play area. Assign the court root (Basketball_Court -3D). If null, world space is used.")]
+        [SerializeField] private Transform boundsOrigin;
+        [Tooltip("Half-extent of the allowed play area along the bounds origin's X axis. Set to match the East/West wall positions. 0 = disabled.")]
+        [SerializeField] [Min(0f)] private float boundsHalfX = 2.58f;
+        [Tooltip("Half-extent of the allowed play area along the bounds origin's Z axis. Set to match the North/South wall positions. 0 = disabled.")]
+        [SerializeField] [Min(0f)] private float boundsHalfZ = 1.08f;
+
         // Tracks which hand last held each ball, so the fallback path knows which velocity buffer to use.
         private readonly Dictionary<Rigidbody, HandSide> _lastGrabHand = new Dictionary<Rigidbody, HandSide>();
 
@@ -91,10 +99,11 @@ namespace Basketball
         /// <summary>
         /// Fired when the player releases a ball.
         /// Carries the smoothed release velocity, which hand was used, the release world position,
-        /// the grab-to-release duration, and per-finger normalized flexion (Thumb→Pinky, 0=open 1=closed).
+        /// the grab-to-release duration, per-finger normalized flexion (Thumb→Pinky, 0=open 1=closed),
+        /// and the Rigidbody of the released ball for downstream trajectory tracking.
         /// Finger flexion array is null if no SG_TrackedHand is assigned.
         /// </summary>
-        public event System.Action<Vector3, HandSide, Vector3, float, float[]> OnBallReleased;
+        public event System.Action<Vector3, HandSide, Vector3, float, float[], Rigidbody> OnBallReleased;
 
         public enum HandSide { Left, Right }
 
@@ -194,6 +203,23 @@ namespace Basketball
                     ResetBall(rb);
                     continue;
                 }
+
+                // ── XZ boundary check ────────────────────────────────────────────
+                if (ballSpawnPoint != null && (boundsHalfX > 0f || boundsHalfZ > 0f))
+                {
+                    Vector3 localPos = boundsOrigin != null
+                        ? boundsOrigin.InverseTransformPoint(rb.position)
+                        : rb.position;
+
+                    if ((boundsHalfX > 0f && Mathf.Abs(localPos.x) > boundsHalfX) ||
+                        (boundsHalfZ > 0f && Mathf.Abs(localPos.z) > boundsHalfZ))
+                    {
+                        Debug.Log($"[HandThrow] {rb.name} escaped play area (local={localPos:F2}). Resetting.");
+                        ResetBall(rb);
+                        continue;
+                    }
+                }
+                // ── End XZ boundary check ────────────────────────────────────────
 
                 if (autoResetAfterSeconds > 0f
                     && _lastMovedTime.TryGetValue(rb, out float lastMoved)
@@ -349,7 +375,7 @@ namespace Basketball
             if (ballThrower != null)
                 ballThrower.RecordShot();
 
-            OnBallReleased?.Invoke(releaseVelocity, side, releasePosition, grabDuration, fingerFlexion);
+            OnBallReleased?.Invoke(releaseVelocity, side, releasePosition, grabDuration, fingerFlexion, ballRb);
             _lastMovedTime[ballRb] = Time.time;
 
             Debug.Log($"[HandThrow] Ball released by {side} hand. Speed: {releaseVelocity.magnitude:F2} m/s. " +

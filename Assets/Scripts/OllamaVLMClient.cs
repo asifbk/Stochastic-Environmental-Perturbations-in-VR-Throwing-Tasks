@@ -32,6 +32,10 @@ namespace Basketball
         private const string TagsEndpoint    = "/api/tags";
         private const float  WatchdogSeconds = 120f;
 
+        // Health-check retry settings
+        private const int   HealthCheckMaxRetries  = -1;  // -1 = retry forever until tunnel is up
+        private const float HealthCheckRetryDelay  = 15f; // seconds between retries
+
         // ─── Hardcoded Configuration ──────────────────────────────────────────────
 
         /// <summary>Bizon Ollama via SSH tunnel: ssh -L 11435:localhost:11434 mkarim1@bizon.host.ualr.edu -p 22415 -N</summary>
@@ -39,9 +43,9 @@ namespace Basketball
         private const string BizonModel     = "qwen2.5:7b";
         private const float  RequestTimeout = 60f;
 
-        // Generation — tuned for low-latency VR coaching
-        private const int   CtxWindow      = 512;  // small = faster KV-cache
-        private const int   MaxTokens      = 60;   // ~3 short sentences
+        // Generation — tuned for ultra-low-latency VR coaching
+        private const int   CtxWindow      = 256;  // very small = faster KV-cache (was 512)
+        private const int   MaxTokens      = 40;   // ~2 short sentences (was 60)
         private const float Temp           = 0f;   // greedy / deterministic
         private const int   TopKValue      = 1;    // true greedy with temp=0
         private const float TopPValue      = 1.0f;
@@ -49,7 +53,7 @@ namespace Basketball
         private const int   FixedSeed      = 42;
 
         private const string CoachPrompt =
-            "You are a VR basketball coach. Give 2 short, direct sentences of feedback. No lists.";
+            "VR basketball coach. 1-2 short sentences only. Direct feedback.";
 
         // ─── Public metadata (read by SessionMetadataLogger) ──────────────────────
 
@@ -62,6 +66,9 @@ namespace Basketball
 
         /// <summary>True while a request is in flight or queued.</summary>
         public bool IsBusy => _queue.Count > 0 || _activeCoroutine != null;
+
+        /// <summary>True once the health check has confirmed the tunnel is live and the model is present.</summary>
+        public bool IsReady { get; private set; }
 
         private readonly Queue<IEnumerator> _queue = new Queue<IEnumerator>();
         private Coroutine _activeCoroutine;
@@ -166,39 +173,59 @@ namespace Basketball
 
         /// <summary>
         /// Fires on Start. Hits /api/tags to verify the SSH tunnel is alive and
-        /// the configured model exists on Bizon. Prints a clear diagnosis to the Console.
+        /// the configured model exists on Bizon. Retries every <see cref="HealthCheckRetryDelay"/>
+        /// seconds until the tunnel is reachable, so Unity does not need to be restarted
+        /// after the tunnel is brought up. Sets <see cref="IsReady"/> to true on success.
         /// </summary>
         private IEnumerator RunHealthCheck()
         {
-            string url = BizonBaseUrl.TrimEnd('/') + TagsEndpoint;
-            using (UnityWebRequest www = UnityWebRequest.Get(url))
+            string url   = BizonBaseUrl.TrimEnd('/') + TagsEndpoint;
+            int    tries = 0;
+
+            while (HealthCheckMaxRetries < 0 || tries <= HealthCheckMaxRetries)
             {
-                www.timeout = 10;
-                yield return www.SendWebRequest();
+                tries++;
 
-                if (www.result != UnityWebRequest.Result.Success)
+                using (UnityWebRequest www = UnityWebRequest.Get(url))
                 {
-                    Debug.LogError(
-                        $"[OllamaClient] HealthCheck FAILED — cannot reach {url}\n" +
-                        $"Error: {www.error}\n\n" +
-                        $"Fix: On your LOCAL machine run and keep open:\n" +
-                        $"  ssh -L 11435:localhost:11434 mkarim1@bizon.host.ualr.edu -p 22415 -N");
-                    yield break;
-                }
+                    www.timeout = 10;
+                    yield return www.SendWebRequest();
 
-                string body = www.downloadHandler.text;
-                if (body.Contains($"\"name\":\"{BizonModel}\""))
-                {
-                    Debug.Log($"[OllamaClient] HealthCheck OK — tunnel live, model '{BizonModel}' ready at {BizonBaseUrl}");
-                }
-                else
-                {
+                    if (www.result != UnityWebRequest.Result.Success)
+                    {
+                        Debug.LogWarning(
+                            $"[OllamaClient] HealthCheck attempt {tries} FAILED — cannot reach {url}\n" +
+                            $"Error: {www.error}\n" +
+                            $"Retrying in {HealthCheckRetryDelay}s...\n\n" +
+                            $"Fix: On your LOCAL machine run and keep open:\n" +
+                            $"  ssh -L 11435:localhost:11434 mkarim1@bizon.host.ualr.edu -p 22415 -N");
+
+                        yield return new WaitForSeconds(HealthCheckRetryDelay);
+                        continue;
+                    }
+
+                    string body = www.downloadHandler.text;
+                    if (body.Contains($"\"name\":\"{BizonModel}\""))
+                    {
+                        IsReady = true;
+                        Debug.Log(
+                            $"[OllamaClient] HealthCheck OK (attempt {tries}) — " +
+                            $"tunnel live, model '{BizonModel}' ready at {BizonBaseUrl}");
+                        yield break;
+                    }
+
+                    // Tunnel is up but model is missing — no point retrying.
                     Debug.LogError(
                         $"[OllamaClient] HealthCheck — tunnel live but model '{BizonModel}' not found.\n" +
                         $"Available models:\n{body}\n\n" +
                         $"Fix: Run on Bizon: ollama pull {BizonModel}");
+                    yield break;
                 }
             }
+
+            Debug.LogError(
+                $"[OllamaClient] HealthCheck gave up after {tries} attempts. " +
+                $"Establish the SSH tunnel and restart Play Mode.");
         }
 
         // ─── Core Request ─────────────────────────────────────────────────────────

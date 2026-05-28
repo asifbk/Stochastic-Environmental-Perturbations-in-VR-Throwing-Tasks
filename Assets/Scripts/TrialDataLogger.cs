@@ -122,7 +122,7 @@ namespace Basketball
 
         private void OnHandBallReleased(Vector3 releaseVelocity, HandThrow.HandSide side,
                                         Vector3 releasePosition, float grabDuration,
-                                        float[] fingerFlexion)
+                                        float[] fingerFlexion, Rigidbody ball)
         {
             StartTrial(releaseVelocity, side.ToString(), releasePosition, grabDuration, fingerFlexion);
         }

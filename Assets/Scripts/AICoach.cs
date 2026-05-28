@@ -221,7 +221,8 @@ namespace Basketball
         /// Opens the shot record and outcome window so a miss is correctly handled
         /// even without a SenseGlove HandThrow release event.
         /// </summary>
-        public void NotifyAutoShotLaunched(Vector3 releasePosition, Vector3 releaseVelocity)
+        public void NotifyAutoShotLaunched(Vector3 releasePosition, Vector3 releaseVelocity,
+                                           Rigidbody ball = null)
         {
             _throwInitiated = true;
 
@@ -262,11 +263,13 @@ namespace Basketball
             _shotCommitted    = false;
 
             ClearFeedback();
+            coachVisuals?.StartTracking(ball, hoopTransform != null ? hoopTransform.position : Vector3.zero);
             Debug.Log($"[AICoach] AutoShot #{_shotCount} — speed {_pending.ReleaseSpeedMs:F2} m/s, angle {_pending.ReleaseAngleDeg:F1}°. Waiting {outcomeWaitSeconds}s for outcome.");
         }
 
         private void OnBallReleased(Vector3 releaseVelocity, HandThrow.HandSide side,
-                                    Vector3 releasePosition, float grabDuration, float[] fingerFlexion)
+                                    Vector3 releasePosition, float grabDuration, float[] fingerFlexion,
+                                    Rigidbody ball)
         {
             _throwInitiated = true;
             Debug.Log($"[AICoach] OnBallReleased — hand={side}, speed={releaseVelocity.magnitude:F2} m/s. Coach pipeline starting.");
@@ -306,6 +309,7 @@ namespace Basketball
             _shotCommitted    = false;
 
             ClearFeedback();
+            coachVisuals?.StartTracking(ball, hoopTransform != null ? hoopTransform.position : Vector3.zero);
             Debug.Log($"[AICoach] Shot #{_shotCount} — speed {_pending.ReleaseSpeedMs:F2} m/s, angle {_pending.ReleaseAngleDeg:F1}°. Waiting {outcomeWaitSeconds}s for outcome.");
         }
 
@@ -405,6 +409,7 @@ namespace Basketball
             // Show visual guidance based on pre-computed physics — no LLM parsing needed.
             if (coachVisuals != null && hoopTransform != null)
             {
+                coachVisuals.StopTracking();
                 (float idealAngle, float idealSpeed) = ComputeIdealShot(_pending.ReleasePosition);
                 Vector3 playerPos = playerTransform != null
                     ? playerTransform.position
@@ -484,13 +489,13 @@ namespace Basketball
             float  angleDelta = idealAngle - _pending.ReleaseAngleDeg;
             float  speedDelta = idealSpeed - _pending.ReleaseSpeedMs;
 
-            string angleFault = Mathf.Abs(angleDelta) < AngleFaultThresholdDeg ? "angle OK"
-                              : angleDelta > 0f                                  ? $"too flat by {angleDelta:F1}°"
-                                                                                 : $"too steep by {Mathf.Abs(angleDelta):F1}°";
+            string angleFault = Mathf.Abs(angleDelta) < AngleFaultThresholdDeg ? "OK"
+                              : angleDelta > 0f                                  ? $"flat {angleDelta:F1}°"
+                                                                                 : $"steep {Mathf.Abs(angleDelta):F1}°";
 
-            string speedFault = Mathf.Abs(speedDelta) < SpeedFaultThresholdMs ? "speed OK"
-                              : speedDelta > 0f                                 ? $"too slow by {speedDelta:F2} m/s"
-                                                                                : $"too fast by {Mathf.Abs(speedDelta):F2} m/s";
+            string speedFault = Mathf.Abs(speedDelta) < SpeedFaultThresholdMs ? "OK"
+                              : speedDelta > 0f                                 ? $"slow {speedDelta:F1}m/s"
+                                                                                : $"fast {Mathf.Abs(speedDelta):F1}m/s";
 
             int  consecutiveMisses = CountConsecutiveMisses();
             bool persistentlyFlat  = IsConsistentAngleFault(positive: true);
@@ -498,46 +503,38 @@ namespace Basketball
             bool persistentlySlow  = IsConsistentSpeedFault(positive: true);
             bool persistentlyFast  = IsConsistentSpeedFault(positive: false);
 
-            // Keep the prompt as short as possible — every extra token increases TTFT on the SSH tunnel.
+            // Ultra-compact prompt for fastest response on SSH tunnel
             var sb = new StringBuilder();
 
-            sb.Append($"Shot #{_pending.ShotNumber}: {_pending.Outcome}. ");
+            sb.Append($"#{_pending.ShotNumber} {_pending.Outcome}. ");
 
             if (hoopTransform != null)
             {
                 Vector3 toHoop = hoopTransform.position - _pending.ReleasePosition;
                 float   hDist  = new Vector2(toHoop.x, toHoop.z).magnitude;
-                float   vDiff  = hoopTransform.position.y - _pending.ReleasePosition.y;
-                sb.Append($"Hoop: {hDist:F1}m away, {vDiff:F1}m up. Ideal: {idealAngle:F1}° at {idealSpeed:F2}m/s. ");
+                sb.Append($"{hDist:F0}m {_pending.ReleaseAngleDeg:F0}°/{_pending.ReleaseSpeedMs:F1}m/s ({angleFault}, {speedFault}). ");
             }
 
-            sb.Append($"Released: {_pending.ReleaseAngleDeg:F1}° at {_pending.ReleaseSpeedMs:F2}m/s. ");
-            sb.Append($"{angleFault}, {speedFault}. ");
-
-            if (_pending.RimImpactSpeedMs >= 0f)
-                sb.Append($"Rim hit at {_pending.RimImpactSpeedMs:F2}m/s. ");
-
-            if (_pending.EntrySpeedMs >= 0f)
-                sb.Append($"Entry: {_pending.EntrySpeedMs:F2}m/s at {_pending.EntryAngleDeg:F1}°. ");
-
-            if (windSystem != null && _pending.WindSpeedMs > 0.01f)
-                sb.Append($"Wind: {_pending.WindSpeedMs:F2}m/s {_pending.WindCardinal}. ");
-
-            // Trend context — only append when meaningful to keep the prompt tight.
+            // Trend context — only append when meaningful
             if (consecutiveMisses >= ConsecutiveMissThreshold)
-                sb.Append($"{consecutiveMisses} misses in a row. ");
-            if (persistentlyFlat)  sb.Append("Trend: consistently too flat. ");
-            if (persistentlySteep) sb.Append("Trend: consistently too steep. ");
-            if (persistentlySlow)  sb.Append("Trend: consistently too slow. ");
-            if (persistentlyFast)  sb.Append("Trend: consistently too hard. ");
+                sb.Append($"{consecutiveMisses} miss streak. ");
+            if (persistentlyFlat || persistentlySteep || persistentlySlow || persistentlyFast)
+            {
+                sb.Append("Trend: ");
+                if (persistentlyFlat)  sb.Append("flat ");
+                if (persistentlySteep) sb.Append("steep ");
+                if (persistentlySlow)  sb.Append("slow ");
+                if (persistentlyFast)  sb.Append("hard ");
+                sb.Append(". ");
+            }
 
-            // Outcome-specific coaching instruction — the most important part.
+            // Outcome-specific coaching instruction
             if (IsSwish(_pending))
-                sb.Append("Perfect swish! Tell the player what made this ideal and how to repeat it.");
+                sb.Append("Perfect swish! Confirm form.");
             else if (IsRimIn(_pending))
-                sb.Append("Scored but hit the rim. Give one specific tip to clean it up.");
+                sb.Append("Rim hit—one fix?");
             else
-                sb.Append("Missed. Tell the player exactly how to adjust angle and speed to score.");
+                sb.Append("Miss. How adjust?");
 
             return sb.ToString();
         }

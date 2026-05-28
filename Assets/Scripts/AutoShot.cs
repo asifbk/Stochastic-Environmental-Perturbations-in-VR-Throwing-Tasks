@@ -152,7 +152,7 @@ namespace Basketball
 
             // Notify AICoach with full release kinematics so the outcome window opens
             // immediately — this ensures a miss is caught even without a HandThrow event.
-            aiCoach?.NotifyAutoShotLaunched(ballRigidbody.position, _launchVelocity);
+            aiCoach?.NotifyAutoShotLaunched(ballRigidbody.position, _launchVelocity, ballRigidbody);
 
             // Disable rim so the ball passes cleanly through the hoop centre.
             if (rimCollider != null)
