@@ -45,6 +45,7 @@ namespace Basketball
 
         /// <summary>
         /// Pre-computes the ideal arc and starts the ghost ball animation.
+        /// The ball plays exactly <see cref="loopCount"/> times and then hides itself.
         /// </summary>
         /// <param name="origin">Launch position (camera rig / hand release point).</param>
         /// <param name="target">Hoop centre world position.</param>
@@ -61,6 +62,28 @@ namespace Basketball
 
             ghostRenderer.gameObject.SetActive(true);
             _animCoroutine = StartCoroutine(AnimateCoroutine());
+        }
+
+        /// <summary>
+        /// Pre-computes the ideal arc and loops the ghost ball animation indefinitely
+        /// until <see cref="Stop"/> is called. Use this as the persistent pre-shot guide
+        /// so the user can repeatedly observe the ideal throw path before releasing.
+        /// </summary>
+        /// <param name="origin">Launch position (camera rig / hand release point).</param>
+        /// <param name="target">Hoop centre world position.</param>
+        /// <param name="angleDeg">Ideal release angle in degrees.</param>
+        /// <param name="speedMs">Ideal release speed in m/s.</param>
+        public void PlayLooping(Vector3 origin, Vector3 target, float angleDeg, float speedMs)
+        {
+            Stop();
+
+            if (ghostRenderer == null || speedMs <= 0f) return;
+
+            BuildArc(origin, target, angleDeg, speedMs);
+            if (_arcPoints.Count < 2) return;
+
+            ghostRenderer.gameObject.SetActive(true);
+            _animCoroutine = StartCoroutine(AnimateLoopForeverCoroutine());
         }
 
         /// <summary>Stops the animation and hides the ghost ball immediately.</summary>
@@ -145,21 +168,7 @@ namespace Basketball
 
             for (int loop = 0; loop < loopCount; loop++)
             {
-                // Animate forward along the arc.
-                for (int i = 0; i < pointCount; i++)
-                {
-                    ghostRenderer.transform.position = _arcPoints[i];
-
-                    // Rotate the ball to face its travel direction.
-                    if (i < pointCount - 1)
-                    {
-                        Vector3 dir = (_arcPoints[i + 1] - _arcPoints[i]);
-                        if (dir.sqrMagnitude > 0.0001f)
-                            ghostRenderer.transform.rotation = Quaternion.LookRotation(dir);
-                    }
-
-                    yield return new WaitForSeconds(stepInterval);
-                }
+                yield return AnimateArcOnce(pointCount, stepInterval);
 
                 // Brief pause at the hoop before the next loop.
                 if (pauseAtHoopSeconds > 0f)
@@ -167,6 +176,46 @@ namespace Basketball
             }
 
             Stop();
+        }
+
+        /// <summary>
+        /// Loops the ghost ball indefinitely along the pre-computed arc until stopped externally.
+        /// Used by <see cref="PlayLooping"/> to serve as a persistent pre-shot visual guide.
+        /// </summary>
+        private IEnumerator AnimateLoopForeverCoroutine()
+        {
+            int   pointCount   = _arcPoints.Count;
+            float stepInterval = travelSeconds / (pointCount - 1);
+
+            while (true)
+            {
+                yield return AnimateArcOnce(pointCount, stepInterval);
+
+                if (pauseAtHoopSeconds > 0f)
+                    yield return new WaitForSeconds(pauseAtHoopSeconds);
+            }
+        }
+
+        /// <summary>
+        /// Animates the ghost ball through all arc points once, moving and rotating
+        /// the renderer each step. Shared by both the finite and infinite coroutines.
+        /// </summary>
+        private IEnumerator AnimateArcOnce(int pointCount, float stepInterval)
+        {
+            for (int i = 0; i < pointCount; i++)
+            {
+                ghostRenderer.transform.position = _arcPoints[i];
+
+                // Rotate the ball to face its travel direction.
+                if (i < pointCount - 1)
+                {
+                    Vector3 dir = _arcPoints[i + 1] - _arcPoints[i];
+                    if (dir.sqrMagnitude > 0.0001f)
+                        ghostRenderer.transform.rotation = Quaternion.LookRotation(dir);
+                }
+
+                yield return new WaitForSeconds(stepInterval);
+            }
         }
     }
 }

@@ -30,6 +30,17 @@ namespace Basketball
         [Tooltip("Fraction of each dot segment that is visible (0–1). 0.4 = 40 % on, 60 % off.")]
         [SerializeField][Range(0.01f, 0.99f)] private float dotDuty = 0.4f;
 
+        [Header("Release Zone Indicator")]
+        [Tooltip("LineRenderer used to draw the 3D ring at the ideal release point. " +
+                 "Faces the hoop so the player can see where and at what height to let go of the ball.")]
+        [SerializeField] private LineRenderer releaseZoneIndicator;
+
+        [Tooltip("Radius of the release zone ring in metres.")]
+        [SerializeField] private float releaseZoneRadius = 0.18f;
+
+        [Tooltip("Number of segments used to approximate the ring circle.")]
+        [SerializeField] [Min(8)] private int releaseZoneSegments = 32;
+
         [Header("Trajectory Arc")]
         [SerializeField] private LineRenderer trajectoryArc;
 
@@ -93,7 +104,11 @@ namespace Basketball
             float useSpeed       = correctedSpeed > 0f ? correctedSpeed : idealSpeedMs;
 
             DrawArc(arcOrigin, hoopPos, idealAngleDeg, useSpeed);
-            ghostBallAnimator?.Play(arcOrigin, hoopPos, idealAngleDeg, useSpeed);
+            PlaceReleaseZone(arcOrigin, hoopPos);
+
+            // Loop the ghost ball indefinitely so the player can repeatedly observe
+            // the ideal throw before taking their next shot.
+            ghostBallAnimator?.PlayLooping(arcOrigin, hoopPos, idealAngleDeg, useSpeed);
         }
 
         /// <summary>Hides both visual aids and stops any active ball tracking.</summary>
@@ -102,6 +117,7 @@ namespace Basketball
             if (floorMarkerRenderer  != null) floorMarkerRenderer.gameObject.SetActive(false);
             if (trajectoryArc        != null) trajectoryArc.gameObject.SetActive(false);
             if (actualTrajectoryArc  != null) actualTrajectoryArc.gameObject.SetActive(false);
+            if (releaseZoneIndicator != null) releaseZoneIndicator.gameObject.SetActive(false);
             StopTracking();
             ghostBallAnimator?.Stop();
         }
@@ -265,9 +281,59 @@ namespace Basketball
             floorMarkerRenderer.loop = false;
         }
 
-        // ─── Trajectory arc ───────────────────────────────────────────────────────
+        // ─── Release zone indicator ───────────────────────────────────────────────
 
         /// <summary>
+        /// Draws a gold ring at <paramref name="arcOrigin"/> whose plane faces the hoop.
+        /// The ring acts as a spatial "release window" — the player should let go of the
+        /// ball when their hand passes through this position at the correct height.
+        /// </summary>
+        private void PlaceReleaseZone(Vector3 arcOrigin, Vector3 hoopPos)
+        {
+            if (releaseZoneIndicator == null) return;
+
+            // Build an orthonormal basis where forward points toward the hoop.
+            Vector3 forward = (hoopPos - arcOrigin);
+            forward.y = 0f;                              // keep horizontal for a clean ring face
+            if (forward.sqrMagnitude < 0.0001f) return;
+            forward.Normalize();
+
+            Vector3 right = Vector3.Cross(Vector3.up, forward).normalized;
+            Vector3 up    = Vector3.Cross(forward, right).normalized;
+
+            int n      = releaseZoneSegments;
+            var points = new Vector3[n + 1];             // +1 to close the loop
+            for (int i = 0; i <= n; i++)
+            {
+                float angle = 2f * Mathf.PI * i / n;
+                points[i] = arcOrigin
+                           + right * (Mathf.Cos(angle) * releaseZoneRadius)
+                           + up    * (Mathf.Sin(angle) * releaseZoneRadius);
+            }
+
+            releaseZoneIndicator.positionCount = n + 1;
+            releaseZoneIndicator.SetPositions(points);
+            releaseZoneIndicator.loop = false;           // last point equals first — already closed
+
+            // Gold/yellow gradient so it reads clearly against the green arc and red trajectory.
+            var colorKeys = new GradientColorKey[]
+            {
+                new GradientColorKey(new Color(1f, 0.85f, 0f), 0f),
+                new GradientColorKey(new Color(1f, 0.85f, 0f), 1f)
+            };
+            var alphaKeys = new GradientAlphaKey[]
+            {
+                new GradientAlphaKey(1f, 0f),
+                new GradientAlphaKey(1f, 1f)
+            };
+            var gradient = new Gradient();
+            gradient.SetKeys(colorKeys, alphaKeys);
+            releaseZoneIndicator.colorGradient = gradient;
+
+            releaseZoneIndicator.gameObject.SetActive(true);
+        }
+
+        // ─── Trajectory arc ───────────────────────────────────────────────────────        /// <summary>
         /// Derives the launch speed required to reach <paramref name="target"/> from
         /// <paramref name="origin"/> at <paramref name="angleDeg"/>, accounting for the
         /// height difference between origin and target (elevated-target ballistic formula).
