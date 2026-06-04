@@ -37,9 +37,11 @@ namespace Basketball
 
         // ─── Private state ────────────────────────────────────────────────────────
 
-        private Coroutine        _animCoroutine;
-        private List<Vector3>    _arcPoints = new List<Vector3>();
-        private const float      ArcMaxSeconds = 5f;
+        private Coroutine     _animCoroutine;
+        private List<Vector3> _arcPoints = new List<Vector3>();
+
+        private const float ArcMaxSeconds = 5f;
+        private const float NetExitDepthM = 0.45f; // Distance below hoop rim the ghost ball travels through the net.
 
         // ─── Public API ───────────────────────────────────────────────────────────
 
@@ -47,7 +49,7 @@ namespace Basketball
         /// Pre-computes the ideal arc and starts the ghost ball animation.
         /// The ball plays exactly <see cref="loopCount"/> times and then hides itself.
         /// </summary>
-        /// <param name="origin">Launch position (camera rig / hand release point).</param>
+        /// <param name="origin">Ball release position.</param>
         /// <param name="target">Hoop centre world position.</param>
         /// <param name="angleDeg">Ideal release angle in degrees.</param>
         /// <param name="speedMs">Ideal release speed in m/s.</param>
@@ -69,7 +71,7 @@ namespace Basketball
         /// until <see cref="Stop"/> is called. Use this as the persistent pre-shot guide
         /// so the user can repeatedly observe the ideal throw path before releasing.
         /// </summary>
-        /// <param name="origin">Launch position (camera rig / hand release point).</param>
+        /// <param name="origin">Ball release position.</param>
         /// <param name="target">Hoop centre world position.</param>
         /// <param name="angleDeg">Ideal release angle in degrees.</param>
         /// <param name="speedMs">Ideal release speed in m/s.</param>
@@ -102,9 +104,9 @@ namespace Basketball
         // ─── Arc computation ──────────────────────────────────────────────────────
 
         /// <summary>
-        /// Simulates the ideal ballistic arc step-by-step and stores every position.
-        /// Uses the elevated-target ballistic formula for the initial velocity so the
-        /// arc actually reaches the hoop regardless of height difference.
+        /// Simulates the ideal ballistic arc from <paramref name="origin"/> to
+        /// <paramref name="target"/> and stores all points including a short tail
+        /// through the net so the ghost ball visually exits below the rim.
         /// </summary>
         private void BuildArc(Vector3 origin, Vector3 target, float angleDeg, float speedMs)
         {
@@ -114,26 +116,29 @@ namespace Basketball
             Vector3 horizontal    = new Vector3(toTarget.x, 0f, toTarget.z).normalized;
             float   horizDist     = new Vector2(toTarget.x, toTarget.z).magnitude;
 
-            float   angleRad      = angleDeg * Mathf.Deg2Rad;
+            float   angleRad       = angleDeg * Mathf.Deg2Rad;
             float   correctedSpeed = ComputeSpeedForTarget(origin, target, angleDeg);
-            float   useSpeed      = correctedSpeed > 0f ? correctedSpeed : speedMs;
+            float   useSpeed       = correctedSpeed > 0f ? correctedSpeed : speedMs;
 
             Vector3 velocity = (horizontal * Mathf.Cos(angleRad)
-                              + Vector3.up  * Mathf.Sin(angleRad)) * useSpeed;
+                               + Vector3.up  * Mathf.Sin(angleRad)) * useSpeed;
             Vector3 pos      = origin;
             float   elapsed  = 0f;
 
             while (elapsed < ArcMaxSeconds)
             {
                 _arcPoints.Add(pos);
-                velocity  += Vector3.down * gravityMs2 * simStep;
-                pos       += velocity * simStep;
-                elapsed   += simStep;
+
+                velocity += Vector3.down * gravityMs2 * simStep;
+                pos      += velocity * simStep;
+                elapsed  += simStep;
 
                 float covered = new Vector2(pos.x - origin.x, pos.z - origin.z).magnitude;
                 if (covered >= horizDist * 0.97f && velocity.y < 0f)
                 {
+                    // Snap to the exact hoop centre, then extend downward through the net.
                     _arcPoints.Add(target);
+                    _arcPoints.Add(target + Vector3.down * NetExitDepthM);
                     break;
                 }
 
@@ -148,29 +153,28 @@ namespace Basketball
         /// </summary>
         private float ComputeSpeedForTarget(Vector3 origin, Vector3 target, float angleDeg)
         {
-            Vector3 delta     = target - origin;
-            float   horizDist = new Vector2(delta.x, delta.z).magnitude;
+            Vector3 delta      = target - origin;
+            float   horizDist  = new Vector2(delta.x, delta.z).magnitude;
             float   heightDiff = delta.y;
-            float   theta     = angleDeg * Mathf.Deg2Rad;
-            float   cosTheta  = Mathf.Cos(theta);
-            float   tanTheta  = Mathf.Tan(theta);
-            float   denom     = 2f * cosTheta * cosTheta * (horizDist * tanTheta - heightDiff);
+            float   theta      = angleDeg * Mathf.Deg2Rad;
+            float   cosTheta   = Mathf.Cos(theta);
+            float   tanTheta   = Mathf.Tan(theta);
+            float   denom      = 2f * cosTheta * cosTheta * (horizDist * tanTheta - heightDiff);
             if (denom <= 0f) return 0f;
             return Mathf.Sqrt(gravityMs2 * horizDist * horizDist / denom);
         }
 
-        // ─── Animation coroutine ──────────────────────────────────────────────────
+        // ─── Animation coroutines ─────────────────────────────────────────────────
 
         private IEnumerator AnimateCoroutine()
         {
-            int   pointCount    = _arcPoints.Count;
-            float stepInterval  = travelSeconds / (pointCount - 1);
+            int   pointCount   = _arcPoints.Count;
+            float stepInterval = travelSeconds / (pointCount - 1);
 
             for (int loop = 0; loop < loopCount; loop++)
             {
                 yield return AnimateArcOnce(pointCount, stepInterval);
 
-                // Brief pause at the hoop before the next loop.
                 if (pauseAtHoopSeconds > 0f)
                     yield return new WaitForSeconds(pauseAtHoopSeconds);
             }

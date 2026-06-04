@@ -35,6 +35,9 @@ namespace Basketball
                  "Faces the hoop so the player can see where and at what height to let go of the ball.")]
         [SerializeField] private LineRenderer releaseZoneIndicator;
 
+        [Tooltip("Angle wedge renderer that visualises the angular error between actual and ideal launch vectors.")]
+        [SerializeField] private AngleWedgeRenderer angleWedge;
+
         [Tooltip("Radius of the release zone ring in metres.")]
         [SerializeField] private float releaseZoneRadius = 0.18f;
 
@@ -44,13 +47,9 @@ namespace Basketball
         [Header("Trajectory Arc")]
         [SerializeField] private LineRenderer trajectoryArc;
 
-        [Tooltip("Assign the [CameraRig]/Camera Transform. The arc starts from this position " +
-                 "at average hand-raise height so it originates from the player's body.")]
+        [Tooltip("Assign the [CameraRig]/Camera Transform. Reserved for future use — the arc now always " +
+                 "originates from the recorded release position rather than the camera rig.")]
         [SerializeField] private Transform cameraRigTransform;
-
-        [Tooltip("Height offset above the camera rig origin to approximate the hand release point " +
-                 "when no actual release position is available.")]
-        [SerializeField] private float handHeightOffset = 0.3f;
 
         [Tooltip("Physics simulation time-step for the arc. Smaller = smoother but more points.")]
         [SerializeField] private float arcSimStep = 0.05f;
@@ -69,6 +68,7 @@ namespace Basketball
         private const float ArcMaxSimSeconds    = 5f;
         private const float GravityMs2          = 9.81f;
         private const int   GradientKeyCount    = 8;   // Unity Gradient max is 8 color/alpha keys.
+        private const float NetExitDepthM       = 0.45f; // Distance below hoop rim the arc tail extends through the net.
 
         private void Awake()
         {
@@ -86,17 +86,15 @@ namespace Basketball
         /// <param name="idealAngleDeg">Physics-ideal release angle in degrees.</param>
         /// <param name="idealSpeedMs">Physics-ideal release speed in m/s.</param>
         public void ShowGuidance(Vector3 playerPos, Vector3 releasePos, Vector3 hoopPos,
-                                 float idealAngleDeg, float idealSpeedMs)
+                                 float idealAngleDeg, float idealSpeedMs, float actualAngleDeg = float.NaN)
         {
-            PlaceFloorMarker(playerPos);
+            // Floor marker is placed at the release position so the circle always
+            // tracks the actual ball origin regardless of shot type (hand throw / AutoShot).
+            PlaceFloorMarker(releasePos);
 
-            // Arc origin: use the camera rig's XZ position at hand-raise height.
-            // Falls back to the recorded release position when cameraRigTransform is not assigned.
-            Vector3 arcOrigin = cameraRigTransform != null
-                ? new Vector3(cameraRigTransform.position.x,
-                              cameraRigTransform.position.y + handHeightOffset,
-                              cameraRigTransform.position.z)
-                : releasePos;
+            // Arc origin is always the recorded release position so that the ghost ball,
+            // trajectory arc, and release zone ring all start from where the ball actually left.
+            Vector3 arcOrigin = releasePos;
 
             // Re-derive speed using the correct elevated-target formula so that the
             // arc actually reaches the hoop even when it is above the release point.
@@ -109,6 +107,9 @@ namespace Basketball
             // Loop the ghost ball indefinitely so the player can repeatedly observe
             // the ideal throw before taking their next shot.
             ghostBallAnimator?.PlayLooping(arcOrigin, hoopPos, idealAngleDeg, useSpeed);
+
+            if (!float.IsNaN(actualAngleDeg))
+                angleWedge?.Show(releasePos, hoopPos, actualAngleDeg, idealAngleDeg);
         }
 
         /// <summary>Hides both visual aids and stops any active ball tracking.</summary>
@@ -120,6 +121,7 @@ namespace Basketball
             if (releaseZoneIndicator != null) releaseZoneIndicator.gameObject.SetActive(false);
             StopTracking();
             ghostBallAnimator?.Stop();
+            angleWedge?.Hide();
         }
 
         // ─── Actual trajectory recording ──────────────────────────────────────────
@@ -370,54 +372,61 @@ namespace Basketball
             Vector3 velocity = (horizontal * Mathf.Cos(angleRad)
                                + Vector3.up  * Mathf.Sin(angleRad)) * idealSpeedMs;
 
-            var     points  = new List<Vector3>();
-            var     speeds  = new List<float>();
+            // Simulate the full arc from origin to hoop.
+            var  allPoints = new List<Vector3>();
+            var  allSpeeds = new List<float>();
             Vector3 pos     = arcOrigin;
             float   elapsed = 0f;
 
             while (elapsed < ArcMaxSimSeconds)
             {
-                points.Add(pos);
-                speeds.Add(velocity.magnitude);
+                allPoints.Add(pos);
+                allSpeeds.Add(velocity.magnitude);
 
                 velocity += Physics.gravity * arcSimStep;
                 pos      += velocity * arcSimStep;
                 elapsed  += arcSimStep;
 
-                // Once the simulated ball has covered 90 % of the horizontal distance
-                // and is descending, snap the final point to the hoop centre and stop.
                 float horizCovered = new Vector2(pos.x - arcOrigin.x,
                                                  pos.z - arcOrigin.z).magnitude;
                 if (horizCovered >= totalHorizDist * 0.9f && velocity.y < 0f)
                 {
-                    points.Add(hoopPos);
-                    speeds.Add(velocity.magnitude);
+                    // Snap to the exact hoop centre, then extend downward through the net.
+                    allPoints.Add(hoopPos);
+                    allSpeeds.Add(velocity.magnitude);
+                    allPoints.Add(hoopPos + Vector3.down * NetExitDepthM);
+                    allSpeeds.Add(velocity.magnitude);
                     break;
                 }
 
-                // Safety: abort if the arc falls far below the origin.
                 if (pos.y < arcOrigin.y - 5f) break;
             }
 
-            trajectoryArc.positionCount = points.Count;
-            trajectoryArc.SetPositions(points.ToArray());
+            int count = allPoints.Count;
+            if (count < 2) { trajectoryArc.positionCount = 0; return; }
 
-            // Sample 8 evenly-spaced speeds across the arc to stay within Unity's
-            // Gradient limit of GradientKeyCount (8) color and alpha keys.
+            trajectoryArc.positionCount = count;
+            for (int i = 0; i < count; i++)
+                trajectoryArc.SetPosition(i, allPoints[i]);
+
+            // Build gradient across the full arc speed range.
             float minSpeed = float.MaxValue;
             float maxSpeed = float.MinValue;
-            foreach (float s in speeds) { minSpeed = Mathf.Min(minSpeed, s); maxSpeed = Mathf.Max(maxSpeed, s); }
+            foreach (float s in allSpeeds)
+            {
+                minSpeed = Mathf.Min(minSpeed, s);
+                maxSpeed = Mathf.Max(maxSpeed, s);
+            }
             float speedRange = Mathf.Max(maxSpeed - minSpeed, 0.001f);
 
-            int n        = speeds.Count;
             var colorKeys = new GradientColorKey[GradientKeyCount];
             var alphaKeys = new GradientAlphaKey[GradientKeyCount];
 
             for (int k = 0; k < GradientKeyCount; k++)
             {
                 float time      = (float)k / (GradientKeyCount - 1);
-                int   sampleIdx = Mathf.RoundToInt(time * (n - 1));
-                float t         = Mathf.Clamp01((speeds[sampleIdx] - minSpeed) / speedRange);
+                int   sampleIdx = Mathf.RoundToInt(time * (count - 1));
+                float t         = Mathf.Clamp01((allSpeeds[sampleIdx] - minSpeed) / speedRange);
 
                 colorKeys[k] = new GradientColorKey(new Color(0f, Mathf.Lerp(0.45f, 1f, t), 0f), time);
                 alphaKeys[k] = new GradientAlphaKey(Mathf.Lerp(0.5f, 1f, t), time);

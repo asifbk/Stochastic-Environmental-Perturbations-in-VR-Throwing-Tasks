@@ -50,6 +50,7 @@ namespace Basketball
 
         [Header("Coach UI")]
         [SerializeField] private TextMeshProUGUI coachText;
+        [SerializeField] private FeedbackMetricsPanel feedbackMetricsPanel;
 
         [Header("Coach Visuals")]
         [SerializeField] private CoachVisuals coachVisuals;
@@ -411,11 +412,17 @@ namespace Basketball
             {
                 coachVisuals.StopTracking();
                 (float idealAngle, float idealSpeed) = ComputeIdealShot(_pending.ReleasePosition);
+                float angleDelta = idealAngle - _pending.ReleaseAngleDeg;
+                float speedDelta = idealSpeed - _pending.ReleaseSpeedMs;
+
                 Vector3 playerPos = playerTransform != null
                     ? playerTransform.position
                     : _pending.ReleasePosition;
                 coachVisuals.ShowGuidance(playerPos, _pending.ReleasePosition,
-                                          hoopTransform.position, idealAngle, idealSpeed);
+                                          hoopTransform.position, idealAngle, idealSpeed,
+                                          _pending.ReleaseAngleDeg);
+
+                feedbackMetricsPanel?.Show(angleDelta, speedDelta, _pending.Outcome);
             }
 
             QueryModel();
@@ -642,6 +649,7 @@ namespace Basketball
 
             coachVisuals?.Hide();
             coachTTS?.StopSpeaking();
+            feedbackMetricsPanel?.Hide();
         }
 
         // ─── Shot Classification ──────────────────────────────────────────────────
