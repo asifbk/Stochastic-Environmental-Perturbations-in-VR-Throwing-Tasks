@@ -193,7 +193,7 @@ namespace Basketball
             float absDelta = Mathf.Abs(angleDelta);
             if (absDelta < AngleGreenThreshold)
             {
-                angleLabel.text = "\u2713 angle OK";
+                angleLabel.text = "angle OK";
             }
             else if (angleDelta > 0f)
             {

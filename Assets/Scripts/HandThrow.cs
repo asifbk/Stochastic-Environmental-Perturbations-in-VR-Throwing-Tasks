@@ -426,14 +426,25 @@ namespace Basketball
             return false;
         }
 
-        /// <summary>Teleports a ball back to the spawn point and zeroes its velocity.</summary>
+        /// <summary>
+        /// Resets a ball to its default position. Rack balls snap back to their slot;
+        /// regular balls teleport to the designated spawn point.
+        /// </summary>
         private void ResetBall(Rigidbody rb)
         {
-            rb.velocity        = Vector3.zero;
-            rb.angularVelocity = Vector3.zero;
+            RackBall rackBall = rb.GetComponent<RackBall>();
+            if (rackBall != null)
+            {
+                rackBall.SnapToRack();
+                _lastMovedTime[rb] = Time.time;
+                return;
+            }
+
+            rb.velocity           = Vector3.zero;
+            rb.angularVelocity    = Vector3.zero;
             rb.transform.position = ballSpawnPoint.position;
             rb.transform.rotation = Quaternion.identity;
-            _lastMovedTime[rb] = Time.time;
+            _lastMovedTime[rb]    = Time.time;
         }
     }
 }
